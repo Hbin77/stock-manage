@@ -1,0 +1,38 @@
+# 환경 변수 (API 키, 비밀번호 포함)
+.env
+
+# 데이터베이스 파일 (런타임 데이터)
+*.db
+*.sqlite
+*.sqlite3
+
+# 로그 파일
+logs/
+*.log
+
+# Python 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# 테스트 캐시
+.pytest_cache/
+
+# Claude Code 세션 파일
+.claude/
+
+# macOS 시스템 파일
+.DS_Store
+
+# 가상환경
+venv/
+.venv/
+env/
+.env/
+
+# IDE 설정
+.vscode/
+.idea/
+*.swp
+*.swo

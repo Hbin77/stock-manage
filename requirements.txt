@@ -1,0 +1,35 @@
+# 핵심 데이터 수집
+yfinance>=1.2.0
+pandas==2.2.3
+numpy==2.2.2
+
+# 데이터베이스
+SQLAlchemy==2.0.37
+alembic==1.14.1
+
+# 스케줄링 (실시간 수집)
+APScheduler==3.10.4
+
+# AI 분석 (Google Gemini)
+google-generativeai>=0.8.0
+
+# 웹 대시보드
+streamlit==1.41.1
+plotly==5.24.1
+
+# 환경 설정
+python-dotenv==1.0.1
+
+# HTTP 요청
+requests==2.32.3
+httpx==0.28.1
+
+# 기술적 분석 지표
+ta==0.11.0
+
+# 로깅
+loguru==0.7.3
+
+# 유틸리티
+pytz==2025.1
+tqdm==4.67.1
