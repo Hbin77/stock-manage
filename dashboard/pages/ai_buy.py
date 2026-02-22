@@ -32,6 +32,12 @@ def _get_index_badges(ticker: str) -> str:
         badges.append("`NASDAQ100`")
     if "SP500" in indices:
         badges.append("`S&P500`")
+    if "ETF" in indices:
+        badges.append("`ETF`")
+    if "MIDCAP" in indices:
+        badges.append("`MIDCAP`")
+    if "SMALLCAP" in indices:
+        badges.append("`SMALLCAP`")
     return " ".join(badges)
 
 
@@ -93,10 +99,12 @@ def render():
     else:
         # ── 인덱스 그룹 필터 탭 ──────────────────────────────────────────────
         if _HAS_TICKER_INDEX:
-            tab_all, tab_nasdaq, tab_sp500 = st.tabs(["전체", "NASDAQ100", "S&P500"])
+            tab_all, tab_nasdaq, tab_sp500, tab_etf, tab_midcap, tab_smallcap = st.tabs(
+                ["전체", "NASDAQ100", "S&P500", "ETF", "MIDCAP", "SMALLCAP"]
+            )
         else:
             tab_all = st.container()
-            tab_nasdaq = tab_sp500 = None
+            tab_nasdaq = tab_sp500 = tab_etf = tab_midcap = tab_smallcap = None
 
         def _render_recs(filtered_recs: list[dict]):
             buy_recs = [r for r in filtered_recs if r["action"] in ("BUY", "STRONG_BUY")]
@@ -154,6 +162,30 @@ def render():
                     _render_recs(sp500_recs)
                 else:
                     st.info("S&P500 종목 추천 없음")
+
+        if _HAS_TICKER_INDEX and tab_etf:
+            with tab_etf:
+                etf_recs = [r for r in recs if "ETF" in TICKER_INDEX.get(r["ticker"], [])]
+                if etf_recs:
+                    _render_recs(etf_recs)
+                else:
+                    st.info("ETF 추천 없음")
+
+        if _HAS_TICKER_INDEX and tab_midcap:
+            with tab_midcap:
+                midcap_recs = [r for r in recs if "MIDCAP" in TICKER_INDEX.get(r["ticker"], [])]
+                if midcap_recs:
+                    _render_recs(midcap_recs)
+                else:
+                    st.info("MidCap 추천 없음")
+
+        if _HAS_TICKER_INDEX and tab_smallcap:
+            with tab_smallcap:
+                smallcap_recs = [r for r in recs if "SMALLCAP" in TICKER_INDEX.get(r["ticker"], [])]
+                if smallcap_recs:
+                    _render_recs(smallcap_recs)
+                else:
+                    st.info("SmallCap 추천 없음")
 
     st.divider()
 

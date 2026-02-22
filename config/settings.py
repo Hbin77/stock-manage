@@ -46,6 +46,7 @@ class Settings:
     # --- 모니터링 종목 ---
     # 포트폴리오 보유 종목을 우선 사용 (DB 조회)
     # DB가 없거나 보유 종목이 없을 경우 WATCHLIST_TICKERS 환경변수로 폴백
+    # 환경변수도 없으면 ALL_TICKERS(NASDAQ100 + S&P500) 전체를 사용
     @property
     def WATCHLIST_TICKERS(self) -> list[str]:
         try:
@@ -66,15 +67,18 @@ class Settings:
         except Exception:
             pass
 
-        # 폴백: 환경변수 (최초 init 시 또는 포트폴리오가 비어있을 때)
+        # 폴백 1: 환경변수 (최초 init 시 또는 포트폴리오가 비어있을 때)
         raw = os.getenv("WATCHLIST_TICKERS", "")
         if raw.strip():
             return [t.strip() for t in raw.split(",") if t.strip()]
 
-        return []
+        # 폴백 2: ALL_TICKERS (NASDAQ100 + S&P500 전체)
+        from config.tickers import ALL_TICKERS
+        return ALL_TICKERS
 
     # --- 스케줄 설정 ---
-    FETCH_INTERVAL_MINUTES: int = int(os.getenv("FETCH_INTERVAL_MINUTES", "5"))
+    # 800개 종목 기준 실시간 수집에 5~8분 소요 → 최소 10분 간격 권장
+    FETCH_INTERVAL_MINUTES: int = int(os.getenv("FETCH_INTERVAL_MINUTES", "10"))
     DAILY_ANALYSIS_TIME: str = os.getenv("DAILY_ANALYSIS_TIME", "09:00")
 
     # --- 로깅 ---

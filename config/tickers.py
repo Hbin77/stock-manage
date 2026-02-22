@@ -1,9 +1,13 @@
 """
 모니터링 종목 리스트 모듈
-NASDAQ 100 + S&P 500 구성 종목 정의
+NASDAQ 100 + S&P 500 + 주요 ETF + MidCap + SmallCap 성장주
 
 사용법:
-    from config.tickers import ALL_TICKERS, NASDAQ_100, SP500, TICKER_INDEX
+    from config.tickers import (
+        ALL_TICKERS, NASDAQ_100, SP500,
+        POPULAR_ETFS, MID_CAP, SMALL_CAP_GROWTH,
+        TICKER_INDEX, get_tickers_by_index,
+    )
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,33 +190,434 @@ SP500: list[str] = [
     "ATO", "CMS", "CNP", "OGE", "UGI", "GAS", "NW", "SR",
 ]
 
-# 중복 제거 후 정렬된 전체 종목 리스트
-ALL_TICKERS: list[str] = sorted(set(NASDAQ_100 + SP500))
+# ─────────────────────────────────────────────────────────────────────────────
+# 주요 ETF — 거래량/자산 규모 기준 인기 ETF (yfinance 조회 가능 확인)
+# ─────────────────────────────────────────────────────────────────────────────
+POPULAR_ETFS: list[str] = [
+    # ── 시장 전체 / 대형 인덱스 ──────────────────────────────────────────────
+    "SPY",   # SPDR S&P 500 ETF
+    "QQQ",   # Invesco NASDAQ 100 ETF
+    "DIA",   # SPDR Dow Jones Industrial Average ETF
+    "IWM",   # iShares Russell 2000 ETF
+    "VTI",   # Vanguard Total Stock Market ETF
+    "VOO",   # Vanguard S&P 500 ETF
+    "IVV",   # iShares Core S&P 500 ETF
+    "RSP",   # Invesco S&P 500 Equal Weight ETF
+    "MDY",   # SPDR S&P MidCap 400 ETF
+    "IJH",   # iShares Core S&P MidCap 400 ETF
+    "IJR",   # iShares Core S&P SmallCap 600 ETF
+    "IWF",   # iShares Russell 1000 Growth ETF
+    "IWD",   # iShares Russell 1000 Value ETF
+    "IWO",   # iShares Russell 2000 Growth ETF
+    "IWN",   # iShares Russell 2000 Value ETF
+    "VTV",   # Vanguard Value ETF
+    "VUG",   # Vanguard Growth ETF
+    "VXUS",  # Vanguard Total International Stock ETF
+    "SCHX",  # Schwab U.S. Large-Cap ETF
+    "SPLG",  # SPDR Portfolio S&P 500 ETF
 
-# 각 티커가 속한 인덱스 정보
-# {ticker: ["NASDAQ100", "SP500"]} 형태
+    # ── 섹터 ETF (Select Sector SPDRs + 기타) ────────────────────────────────
+    "XLK",   # Technology Select Sector SPDR
+    "XLF",   # Financial Select Sector SPDR
+    "XLE",   # Energy Select Sector SPDR
+    "XLV",   # Health Care Select Sector SPDR
+    "XLI",   # Industrial Select Sector SPDR
+    "XLC",   # Communication Services Select Sector SPDR
+    "XLY",   # Consumer Discretionary Select Sector SPDR
+    "XLP",   # Consumer Staples Select Sector SPDR
+    "XLB",   # Materials Select Sector SPDR
+    "XLU",   # Utilities Select Sector SPDR
+    "XLRE",  # Real Estate Select Sector SPDR
+    "VGT",   # Vanguard Information Technology ETF
+    "VHT",   # Vanguard Health Care ETF
+    "VFH",   # Vanguard Financials ETF
+    "VDE",   # Vanguard Energy ETF
+    "VNQ",   # Vanguard Real Estate ETF
+    "VIS",   # Vanguard Industrials ETF
+    "VAW",   # Vanguard Materials ETF
+    "VCR",   # Vanguard Consumer Discretionary ETF
+    "VDC",   # Vanguard Consumer Staples ETF
+    "VOX",   # Vanguard Communication Services ETF
+
+    # ── 테마 / 혁신 ETF ──────────────────────────────────────────────────────
+    "ARKK",  # ARK Innovation ETF
+    "ARKW",  # ARK Next Generation Internet ETF
+    "ARKG",  # ARK Genomic Revolution ETF
+    "ARKF",  # ARK Fintech Innovation ETF
+    "SOXX",  # iShares Semiconductor ETF
+    "SMH",   # VanEck Semiconductor ETF
+    "HACK",  # ETFMG Prime Cyber Security ETF
+    "BOTZ",  # Global X Robotics & AI ETF
+    "ROBO",  # Robo Global Robotics & Automation ETF
+    "LIT",   # Global X Lithium & Battery Tech ETF
+    "TAN",   # Invesco Solar ETF
+    "ICLN",  # iShares Global Clean Energy ETF
+    "QCLN",  # First Trust NASDAQ Clean Edge Green Energy ETF
+    "XBI",   # SPDR S&P Biotech ETF
+    "IBB",   # iShares Biotechnology ETF
+    "KWEB",  # KraneShares CSI China Internet ETF
+    "MCHI",  # iShares MSCI China ETF
+    "IGV",   # iShares Expanded Tech-Software Sector ETF
+    "SKYY",  # First Trust Cloud Computing ETF
+    "WCLD",  # WisdomTree Cloud Computing ETF
+    "CIBR",  # First Trust NASDAQ Cybersecurity ETF
+    "XHB",   # SPDR S&P Homebuilders ETF
+    "XRT",   # SPDR S&P Retail ETF
+    "XOP",   # SPDR S&P Oil & Gas Exploration & Production ETF
+    "XME",   # SPDR S&P Metals & Mining ETF
+    "KRE",   # SPDR S&P Regional Banking ETF
+    "KBE",   # SPDR S&P Bank ETF
+    "ITA",   # iShares U.S. Aerospace & Defense ETF
+    "JETS",  # U.S. Global Jets ETF
+    "PBW",   # Invesco WilderHill Clean Energy ETF
+    "DRIV",  # Global X Autonomous & Electric Vehicles ETF
+
+    # ── 채권 ETF ─────────────────────────────────────────────────────────────
+    "TLT",   # iShares 20+ Year Treasury Bond ETF
+    "IEF",   # iShares 7-10 Year Treasury Bond ETF
+    "SHY",   # iShares 1-3 Year Treasury Bond ETF
+    "AGG",   # iShares Core U.S. Aggregate Bond ETF
+    "BND",   # Vanguard Total Bond Market ETF
+    "HYG",   # iShares iBoxx High Yield Corporate Bond ETF
+    "LQD",   # iShares iBoxx Investment Grade Corporate Bond ETF
+    "TIP",   # iShares TIPS Bond ETF
+    "TIPS",  # SPDR Bloomberg TIPS ETF (iShares)
+    "SHV",   # iShares Short Treasury Bond ETF
+    "BNDX",  # Vanguard Total International Bond ETF
+    "EMB",   # iShares J.P. Morgan USD Emerging Markets Bond ETF
+    "MUB",   # iShares National Muni Bond ETF
+    "VCIT",  # Vanguard Intermediate-Term Corporate Bond ETF
+    "VCSH",  # Vanguard Short-Term Corporate Bond ETF
+    "GOVT",  # iShares U.S. Treasury Bond ETF
+    "TMF",   # Direxion Daily 20+ Year Treasury Bull 3X Shares
+    "TMV",   # Direxion Daily 20+ Year Treasury Bear 3X Shares
+
+    # ── 원자재 / 실물자산 ETF ────────────────────────────────────────────────
+    "GLD",   # SPDR Gold Shares
+    "SLV",   # iShares Silver Trust
+    "IAU",   # iShares Gold Trust
+    "USO",   # United States Oil Fund
+    "UNG",   # United States Natural Gas Fund
+    "DBA",   # Invesco DB Agriculture Fund
+    "PDBC",  # Invesco Optimum Yield Diversified Commodity Strategy No K-1 ETF
+    "DBC",   # Invesco DB Commodity Index Tracking Fund
+    "WEAT",  # Teucrium Wheat Fund
+    "CORN",  # Teucrium Corn Fund
+    "PPLT",  # abrdn Physical Platinum Shares ETF
+    "PALL",  # abrdn Physical Palladium Shares ETF
+    "COPX",  # Global X Copper Miners ETF
+
+    # ── 레버리지 / 인버스 ETF ────────────────────────────────────────────────
+    "TQQQ",  # ProShares UltraPro QQQ (3x NASDAQ 100)
+    "SQQQ",  # ProShares UltraPro Short QQQ (-3x NASDAQ 100)
+    "SPXU",  # ProShares UltraPro Short S&P 500 (-3x)
+    "UPRO",  # ProShares UltraPro S&P 500 (3x)
+    "LABU",  # Direxion Daily S&P Biotech Bull 3X Shares
+    "LABD",  # Direxion Daily S&P Biotech Bear 3X Shares
+    "SOXL",  # Direxion Daily Semiconductor Bull 3X Shares
+    "SOXS",  # Direxion Daily Semiconductor Bear 3X Shares
+    "SPXS",  # Direxion Daily S&P 500 Bear 3X Shares
+    "TNA",   # Direxion Daily Small Cap Bull 3X Shares
+    "TZA",   # Direxion Daily Small Cap Bear 3X Shares
+    "UVXY",  # ProShares Ultra VIX Short-Term Futures ETF
+    "SVXY",  # ProShares Short VIX Short-Term Futures ETF
+    "SSO",   # ProShares Ultra S&P 500 (2x)
+    "SDS",   # ProShares UltraShort S&P 500 (-2x)
+    "QLD",   # ProShares Ultra QQQ (2x)
+    "QID",   # ProShares UltraShort QQQ (-2x)
+    "FNGU",  # MicroSectors FANG+ Index 3X Leveraged ETN
+    "FNGD",  # MicroSectors FANG+ Index -3X Inverse Leveraged ETN
+
+    # ── 해외 / 글로벌 ETF ────────────────────────────────────────────────────
+    "EEM",   # iShares MSCI Emerging Markets ETF
+    "EFA",   # iShares MSCI EAFE ETF
+    "VWO",   # Vanguard FTSE Emerging Markets ETF
+    "FXI",   # iShares China Large-Cap ETF
+    "INDA",  # iShares MSCI India ETF
+    "EWJ",   # iShares MSCI Japan ETF
+    "EWZ",   # iShares MSCI Brazil ETF
+    "EWY",   # iShares MSCI South Korea ETF
+    "EWT",   # iShares MSCI Taiwan ETF
+    "EWG",   # iShares MSCI Germany ETF
+    "EWU",   # iShares MSCI United Kingdom ETF
+    "EWA",   # iShares MSCI Australia ETF
+    "EWC",   # iShares MSCI Canada ETF
+    "VEA",   # Vanguard FTSE Developed Markets ETF
+    "IEMG",  # iShares Core MSCI Emerging Markets ETF
+    "ACWI",  # iShares MSCI ACWI ETF
+
+    # ── 배당 / 인컴 ETF ─────────────────────────────────────────────────────
+    "VIG",   # Vanguard Dividend Appreciation ETF
+    "SCHD",  # Schwab U.S. Dividend Equity ETF
+    "DVY",   # iShares Select Dividend ETF
+    "HDV",   # iShares Core High Dividend ETF
+    "JEPI",  # JPMorgan Equity Premium Income ETF
+    "JEPQ",  # JPMorgan Nasdaq Equity Premium Income ETF
+    "NOBL",  # ProShares S&P 500 Dividend Aristocrats ETF
+    "VYM",   # Vanguard High Dividend Yield ETF
+    "DGRO",  # iShares Core Dividend Growth ETF
+    "SPYD",  # SPDR Portfolio S&P 500 High Dividend ETF
+    "DIVO",  # Amplify CWP Enhanced Dividend Income ETF
+    "QYLD",  # Global X NASDAQ 100 Covered Call ETF
+    "XYLD",  # Global X S&P 500 Covered Call ETF
+    "NUSI",  # Nationwide Nasdaq-100 Risk-Managed Income ETF
+
+    # ── 크립토 관련 ETF ──────────────────────────────────────────────────────
+    "IBIT",  # iShares Bitcoin Trust ETF
+    "ETHE",  # Grayscale Ethereum Trust
+    "GBTC",  # Grayscale Bitcoin Trust
+    "BITO",  # ProShares Bitcoin Strategy ETF
+    "FBTC",  # Fidelity Wise Origin Bitcoin Fund
+
+    # ── 변동성 / 전략 ETF ────────────────────────────────────────────────────
+    "VIXY",  # ProShares VIX Short-Term Futures ETF
+    "SPLV",  # Invesco S&P 500 Low Volatility ETF
+    "USMV",  # iShares MSCI USA Minimum Volatility ETF
+    "MTUM",  # iShares MSCI USA Momentum Factor ETF
+    "QUAL",  # iShares MSCI USA Quality Factor ETF
+    "VLUE",  # iShares MSCI USA Value Factor ETF
+    "SIZE",  # iShares MSCI USA Size Factor ETF
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S&P 400 MidCap 주요 종목 — 시가총액 상위 100개 (2025년 기준)
+# ─────────────────────────────────────────────────────────────────────────────
+MID_CAP: list[str] = [
+    "DECK",  # Deckers Outdoor
+    "WSM",   # Williams-Sonoma
+    "FNF",   # Fidelity National Financial
+    "SAIA",  # Saia Inc (물류)
+    "BURL",  # Burlington Stores
+    "TOST",  # Toast Inc (핀테크)
+    "DUOL",  # Duolingo (에드테크)
+    "RKLB",  # Rocket Lab USA (우주)
+    "HOOD",  # Robinhood Markets
+    "SOFI",  # SoFi Technologies
+    "RBC",   # RBC Bearings
+    "MANH",  # Manhattan Associates
+    "LSCC",  # Lattice Semiconductor
+    "WFRD",  # Weatherford International
+    "ELF",   # e.l.f. Beauty
+    "ATI",   # ATI Inc (특수 금속)
+    "SKX",   # Skechers USA
+    "WING",  # Wingstop
+    "CACI",  # CACI International
+    "EWBC",  # East West Bancorp
+    "EXLS",  # ExlService Holdings
+    "PNFP",  # Pinnacle Financial Partners
+    "PCOR",  # Procore Technologies
+    "JBL",   # Jabil Inc
+    "TNET",  # TriNet Group
+    "MKSI",  # MKS Instruments
+    "NOVT",  # Novanta Inc
+    "AZEK",  # AZEK Company
+    "FIX",   # Comfort Systems USA
+    "KNSL",  # Kinsale Capital Group
+    "ENSG",  # Ensign Group
+    "SCI",   # Service Corp International
+    "TREX",  # Trex Company
+    "LNTH",  # Lantheus Holdings
+    "SITE",  # SiteOne Landscape Supply
+    "CSWI",  # CSW Industrials
+    "MTN",   # Vail Resorts
+    "OLN",   # Olin Corp
+    "RMBS",  # Rambus Inc
+    "WTS",   # Watts Water Technologies
+    "FLR",   # Fluor Corp
+    "CW",    # Curtiss-Wright
+    "ESAB",  # ESAB Corp
+    "BRBR",  # BellRing Brands
+    "HWC",   # Hancock Whitney
+    "PIPR",  # Piper Sandler
+    "BWXT",  # BWX Technologies
+    "DOCS",  # Doximity
+    "CVLT",  # Commvault Systems
+    "MIDD",  # Middleby Corp
+    "UFPI",  # UFP Industries
+    "MEDP",  # Medpace Holdings
+    "TMHC",  # Taylor Morrison Home
+    "ONTO",  # Onto Innovation
+    "AVTR",  # Avantor Inc
+    "MMSI",  # Merit Medical Systems
+    "RNR",   # RenaissanceRe Holdings
+    "TENB",  # Tenable Holdings
+    "GLOB",  # Globant SA
+    "GBCI",  # Glacier Bancorp
+    "CALX",  # Calix Inc
+    "SNDR",  # Schneider National
+    "CHDN",  # Churchill Downs
+    "ASGN",  # ASGN Inc
+    "PLNT",  # Planet Fitness
+    "NUVB",  # Nuvation Bio
+    "AXSM",  # Axsome Therapeutics
+    "ITRI",  # Itron Inc
+    "SPSC",  # SPS Commerce
+    "OGN",   # Organon & Co
+    "WEX",   # WEX Inc
+    "LANC",  # Lancaster Colony
+    "AIT",   # Applied Industrial Technologies
+    "WHD",   # Cactus Inc
+    "NMIH",  # NMI Holdings
+    "TRNO",  # Terreno Realty
+    "POWI",  # Power Integrations
+    "ALTR",  # Altair Engineering
+    "MHO",   # M/I Homes
+    "QLYS",  # Qualys Inc
+    "TTEK",  # Tetra Tech
+    "BECN",  # Beacon Roofing Supply
+    "HAE",   # Haemonetics
+    "PRI",   # Primerica
+    "LFUS",  # Littelfuse
+    "COKE",  # Coca-Cola Consolidated
+    "MDGL",  # Madrigal Pharmaceuticals
+    "SWX",   # Southwest Gas Holdings
+    "HUBG",  # Hub Group
+    "FHI",   # Federated Hermes
+    "BCC",   # Boise Cascade
+    "EXPO",  # Exponent Inc
+    "HALO",  # Halozyme Therapeutics
+    "LITE",  # Lumentum Holdings
+    "OLED",  # Universal Display Corp
+    "RGEN",  # Repligen Corp
+    "BJ",    # BJ's Wholesale Club
+    "GTLS",  # Chart Industries
+    "WDFC",  # WD-40 Company
+    "DT",    # Dynatrace
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Small-Cap 성장주 — Russell 2000 고성장 종목 50개 (2025년 기준)
+# ─────────────────────────────────────────────────────────────────────────────
+SMALL_CAP_GROWTH: list[str] = [
+    "IONQ",  # IonQ (양자 컴퓨팅)
+    "JOBY",  # Joby Aviation (eVTOL)
+    "AFRM",  # Affirm Holdings (BNPL)
+    "UPST",  # Upstart Holdings (AI 대출)
+    "AEHR",  # Aehr Test Systems (반도체 테스트)
+    "LUNR",  # Intuitive Machines (우주)
+    "DNA",   # Ginkgo Bioworks (합성 생물학)
+    "SOUN",  # SoundHound AI
+    "BTDR",  # Bitdeer Technologies (크립토 마이닝)
+    "ASTS",  # AST SpaceMobile (위성 통신)
+    "MNDY",  # monday.com (워크 매니지먼트)
+    "GTLB",  # GitLab (DevOps)
+    "BRZE",  # Braze Inc (고객 참여)
+    "CELH",  # Celsius Holdings (에너지 음료)
+    "HIMS",  # Hims & Hers Health (텔레헬스)
+    "SG",    # Sweetgreen (레스토랑)
+    "CAVA",  # CAVA Group (레스토랑)
+    "BROS",  # Dutch Bros (커피)
+    "ASPN",  # Aspen Aerogels (단열재)
+    "RXRX",  # Recursion Pharmaceuticals (AI 신약)
+    "CLSK",  # CleanSpark (비트코인 마이닝)
+    "MARA",  # Marathon Digital Holdings (비트코인 마이닝)
+    "RIOT",  # Riot Platforms (비트코인 마이닝)
+    "ARQT",  # Arcutis Biotherapeutics (피부과)
+    "VKTX",  # Viking Therapeutics (비만 치료)
+    "VERA",  # Vera Therapeutics (신장 질환)
+    "GERN",  # Geron Corp (종양학)
+    "ACHR",  # Archer Aviation (eVTOL)
+    "ASAN",  # Asana Inc (프로젝트 관리)
+    "BIGC",  # BigCommerce (이커머스)
+    "DLO",   # DLocal (이머징 결제)
+    "APLS",  # Apellis Pharmaceuticals (안과)
+    "ENVX",  # Enovis (정형외과 → 오류 아닌 Enovix 배터리)
+    "RELY",  # Remitly Global (해외 송금)
+    "VERX",  # Vertex Inc (세금 SW)
+    "XPEL",  # XPEL Inc (자동차 보호 필름)
+    "SFM",   # Sprouts Farmers Market (유기농 식품)
+    "GSAT",  # Globalstar (위성 통신)
+    "IREN",  # Iris Energy (데이터센터/마이닝)
+    "ME",    # 23andMe (유전자 검사)
+    "GRAB",  # Grab Holdings (동남아 슈퍼앱)
+    "CIFR",  # Cipher Mining (비트코인 마이닝)
+    "PSNY",  # Polestar Automotive (EV)
+    "CFLT",  # Confluent (데이터 스트리밍)
+    "DKNG",  # DraftKings (스포츠 베팅)
+    "PATH",  # UiPath (RPA)
+    "BILL",  # BILL Holdings (핀테크)
+    "TASK",  # TaskUs (BPO)
+    "LMND",  # Lemonade (인슈어테크)
+    "CWAN",  # Clearwater Analytics (핀테크)
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 전체 종목 리스트 (중복 제거 + 정렬)
+# ─────────────────────────────────────────────────────────────────────────────
+ALL_TICKERS: list[str] = sorted(
+    set(NASDAQ_100 + SP500 + POPULAR_ETFS + MID_CAP + SMALL_CAP_GROWTH)
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 각 티커가 속한 카테고리 인덱스
+# {ticker: ["NASDAQ100", "SP500", "ETF", "MIDCAP", "SMALLCAP"]} 형태
+# ─────────────────────────────────────────────────────────────────────────────
 TICKER_INDEX: dict[str, list[str]] = {}
+_nasdaq_set = set(NASDAQ_100)
+_sp500_set = set(SP500)
+_etf_set = set(POPULAR_ETFS)
+_midcap_set = set(MID_CAP)
+_smallcap_set = set(SMALL_CAP_GROWTH)
+
 for _t in ALL_TICKERS:
-    _indices = []
-    if _t in NASDAQ_100:
+    _indices: list[str] = []
+    if _t in _nasdaq_set:
         _indices.append("NASDAQ100")
-    if _t in SP500:
+    if _t in _sp500_set:
         _indices.append("SP500")
+    if _t in _etf_set:
+        _indices.append("ETF")
+    if _t in _midcap_set:
+        _indices.append("MIDCAP")
+    if _t in _smallcap_set:
+        _indices.append("SMALLCAP")
     TICKER_INDEX[_t] = _indices
+
+# 임시 변수 정리
+del _nasdaq_set, _sp500_set, _etf_set, _midcap_set, _smallcap_set
 
 
 def get_tickers_by_index(index_name: str) -> list[str]:
-    """특정 인덱스 소속 티커 리스트 반환"""
-    if index_name == "NASDAQ100":
-        return sorted(set(NASDAQ_100))
-    elif index_name == "SP500":
-        return sorted(set(SP500))
+    """특정 인덱스/카테고리 소속 티커 리스트 반환
+
+    지원 카테고리: NASDAQ100, SP500, ETF, MIDCAP, SMALLCAP, ALL
+    """
+    _map = {
+        "NASDAQ100": NASDAQ_100,
+        "SP500": SP500,
+        "ETF": POPULAR_ETFS,
+        "MIDCAP": MID_CAP,
+        "SMALLCAP": SMALL_CAP_GROWTH,
+    }
+    source = _map.get(index_name.upper())
+    if source is not None:
+        return sorted(set(source))
     return ALL_TICKERS
 
 
 if __name__ == "__main__":
-    print(f"NASDAQ 100: {len(set(NASDAQ_100))}개")
-    print(f"S&P 500: {len(set(SP500))}개")
-    print(f"전체 (중복 제거): {len(ALL_TICKERS)}개")
-    overlap = set(NASDAQ_100) & set(SP500)
-    print(f"중복 (양쪽 포함): {len(overlap)}개")
+    print(f"NASDAQ 100:        {len(set(NASDAQ_100)):>4}개")
+    print(f"S&P 500:           {len(set(SP500)):>4}개")
+    print(f"주요 ETF:          {len(set(POPULAR_ETFS)):>4}개")
+    print(f"MidCap:            {len(set(MID_CAP)):>4}개")
+    print(f"SmallCap Growth:   {len(set(SMALL_CAP_GROWTH)):>4}개")
+    print(f"전체 (중복 제거):  {len(ALL_TICKERS):>4}개")
+    print()
+
+    # 카테고리 간 중복 분석
+    overlap_nq_sp = set(NASDAQ_100) & set(SP500)
+    print(f"NASDAQ100 ∩ SP500:     {len(overlap_nq_sp)}개")
+    overlap_etf_sp = set(POPULAR_ETFS) & set(SP500)
+    print(f"ETF ∩ SP500:           {len(overlap_etf_sp)}개")
+    overlap_mid_sp = set(MID_CAP) & set(SP500)
+    print(f"MidCap ∩ SP500:        {len(overlap_mid_sp)}개")
+    overlap_small_sp = set(SMALL_CAP_GROWTH) & set(SP500)
+    print(f"SmallCap ∩ SP500:      {len(overlap_small_sp)}개")
+    print()
+
+    # 카테고리별 개수
+    for cat in ["NASDAQ100", "SP500", "ETF", "MIDCAP", "SMALLCAP"]:
+        cnt = sum(1 for v in TICKER_INDEX.values() if cat in v)
+        print(f"TICKER_INDEX['{cat}']: {cnt}개")

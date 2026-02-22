@@ -18,8 +18,9 @@ from database.connection import get_db
 from database.models import MarketNews, PriceHistory, Stock
 
 # 대규모 종목 처리 시 rate limit 방지용 배치 설정
-BATCH_SIZE = 50        # 배치당 종목 수
-BATCH_DELAY_SEC = 2.0  # 배치 간 지연 (초)
+BATCH_SIZE = 100       # 배치당 종목 수 (yfinance는 100개까지 한번에 처리 가능)
+BATCH_DELAY_SEC = 1.5  # 배치 간 지연 (초)
+NEWS_TARGET_LIMIT = 100  # 뉴스 수집 대상 종목 수 제한 (상위 N개 + 보유 종목)
 
 
 class MarketDataFetcher:
@@ -286,17 +287,32 @@ class MarketDataFetcher:
     def fetch_all_realtime_prices(self) -> dict[str, dict]:
         """
         watchlist 전체 종목의 현재가를 조회합니다.
+        배치 처리 + 진행률 로그로 대규모 종목 처리에 최적화되어 있습니다.
         반환값: {ticker: price_dict}
         """
         results: dict[str, dict] = {}
-        for ticker in settings.WATCHLIST_TICKERS:
-            data = self.fetch_realtime_price(ticker)
-            if data:
-                results[ticker] = data
-                logger.debug(
-                    f"[{ticker}] 현재가: ${data['price']:.2f} "
-                    f"({data['change_pct']:+.2f}%)"
-                )
+        tickers = settings.WATCHLIST_TICKERS
+        total_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
+        logger.info(f"[가격 수집] {len(tickers)}개 종목 실시간 가격 수집 시작 (배치크기={BATCH_SIZE})")
+
+        for batch_start in range(0, len(tickers), BATCH_SIZE):
+            batch = tickers[batch_start:batch_start + BATCH_SIZE]
+            batch_num = batch_start // BATCH_SIZE + 1
+
+            for ticker in batch:
+                data = self.fetch_realtime_price(ticker)
+                if data:
+                    results[ticker] = data
+
+            logger.info(
+                f"[가격 수집] 배치 {batch_num}/{total_batches} 완료 "
+                f"({len(results)}/{len(tickers)})"
+            )
+
+            if batch_start + BATCH_SIZE < len(tickers):
+                time.sleep(BATCH_DELAY_SEC)
+
+        logger.info(f"[가격 수집] 완료: {len(results)}/{len(tickers)}개 종목 수집 성공")
         return results
 
     # ─────────────────────────────────────────
@@ -397,19 +413,85 @@ class MarketDataFetcher:
             logger.error(f"[{ticker}] 뉴스 수집 실패: {e}")
             return 0
 
+    def _get_news_target_tickers(self) -> list[str]:
+        """
+        뉴스 수집 대상 종목을 선정합니다.
+        800개 전체 수집은 비효율적이므로, 보유 종목 + AI 분석 우선순위 상위 종목으로 제한합니다.
+
+        우선순위:
+          1. 포트폴리오 보유 종목 (전체)
+          2. 최근 AI 추천 종목
+          3. 나머지 watchlist에서 NEWS_TARGET_LIMIT까지 채움
+        """
+        all_tickers = settings.WATCHLIST_TICKERS
+
+        # 종목 수가 NEWS_TARGET_LIMIT 이하면 전체 수집
+        if len(all_tickers) <= NEWS_TARGET_LIMIT:
+            return all_tickers
+
+        target_set: set[str] = set()
+
+        # 1) 보유 종목 추가
+        try:
+            from database.connection import SessionLocal
+            from database.models import PortfolioHolding, Stock as StockModel
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(StockModel.ticker)
+                    .join(PortfolioHolding, PortfolioHolding.stock_id == StockModel.id)
+                    .filter(PortfolioHolding.quantity > 0)
+                    .all()
+                )
+                target_set.update(r.ticker for r in rows)
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+        # 2) 최근 AI 추천 종목 추가
+        try:
+            from database.models import AIRecommendation
+            from database.connection import SessionLocal
+            db = SessionLocal()
+            try:
+                from datetime import timedelta
+                cutoff = datetime.now() - timedelta(days=7)
+                recs = (
+                    db.query(AIRecommendation.ticker)
+                    .filter(AIRecommendation.created_at >= cutoff)
+                    .distinct()
+                    .all()
+                )
+                target_set.update(r.ticker for r in recs)
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+        # 3) 나머지를 watchlist 순서대로 채움
+        for ticker in all_tickers:
+            if len(target_set) >= NEWS_TARGET_LIMIT:
+                break
+            target_set.add(ticker)
+
+        result = [t for t in all_tickers if t in target_set]
+        logger.info(f"[뉴스] 수집 대상: {len(result)}개 (보유+AI추천 우선, 전체 {len(all_tickers)}개 중)")
+        return result
+
     def fetch_all_news(self) -> int:
         """
-        watchlist 전체 종목의 뉴스를 수집하고 총 저장 건수를 반환합니다.
-        50개씩 배치 처리하여 rate limit을 방지합니다.
+        뉴스 수집 대상 종목의 뉴스를 수집하고 총 저장 건수를 반환합니다.
+        대규모 종목(800+)에서는 보유 종목 + AI 추천 상위 종목으로 제한하여 효율성을 높입니다.
         """
         total = 0
-        tickers = settings.WATCHLIST_TICKERS
+        tickers = self._get_news_target_tickers()
+        total_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
         logger.info(f"전체 뉴스 수집 시작 ({len(tickers)}개 종목, 배치크기={BATCH_SIZE})...")
 
         for batch_start in range(0, len(tickers), BATCH_SIZE):
             batch = tickers[batch_start:batch_start + BATCH_SIZE]
             batch_num = batch_start // BATCH_SIZE + 1
-            total_batches = (len(tickers) + BATCH_SIZE - 1) // BATCH_SIZE
             logger.info(f"뉴스 배치 {batch_num}/{total_batches} 처리 중...")
 
             with get_db() as db:

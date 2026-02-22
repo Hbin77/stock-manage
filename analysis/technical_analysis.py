@@ -175,10 +175,31 @@ class TechnicalAnalyzer:
             return saved
 
     def calculate_all(self) -> dict[str, int]:
-        """watchlist 전체 종목의 기술적 지표를 계산합니다."""
+        """
+        watchlist 전체 종목의 기술적 지표를 계산합니다.
+        50개마다 진행률을 로그로 출력하며, 개별 종목 에러 시 스킵하고 계속 진행합니다.
+        """
+        tickers = settings.WATCHLIST_TICKERS
         results = {}
-        for ticker in settings.WATCHLIST_TICKERS:
-            results[ticker] = self.calculate_and_save(ticker)
+        errors = 0
+        logger.info(f"[기술 지표] {len(tickers)}개 종목 계산 시작")
+
+        for i, ticker in enumerate(tickers, 1):
+            try:
+                results[ticker] = self.calculate_and_save(ticker)
+            except Exception as e:
+                logger.error(f"[{ticker}] 기술 지표 계산 실패, 스킵: {e}")
+                results[ticker] = 0
+                errors += 1
+
+            # 50개마다 진행률 출력
+            if i % 50 == 0 or i == len(tickers):
+                logger.info(
+                    f"[기술 지표] 진행: {i}/{len(tickers)} 완료 "
+                    f"({i/len(tickers)*100:.0f}%, 에러: {errors}건)"
+                )
+
+        logger.info(f"[기술 지표] 전체 완료: {len(results)}개 종목, {errors}건 에러")
         return results
 
     def get_latest_indicators(self, ticker: str) -> dict | None:
