@@ -16,6 +16,7 @@ google-generativeai>=0.8.0
 # 웹 대시보드
 streamlit==1.41.1
 plotly==5.24.1
+matplotlib>=3.8.0
 
 # 환경 설정
 python-dotenv==1.0.1
