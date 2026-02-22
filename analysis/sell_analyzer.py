@@ -4,13 +4,13 @@ Google Gemini API를 사용하여 보유 종목의 매도 타이밍을 분석하
 SellSignal 테이블에 저장합니다.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 
 from config.settings import settings
 from database.connection import get_db
-from database.models import MarketNews, PriceHistory, SellSignal, Stock, TechnicalIndicator
+from database.models import AIRecommendation, MarketNews, PriceHistory, SellSignal, Stock, TechnicalIndicator
 from portfolio.portfolio_manager import portfolio_manager
 
 SELL_SYSTEM_PROMPT = """You are an expert portfolio risk manager specializing in exit strategy optimization.
@@ -105,7 +105,7 @@ class SellAnalyzer:
         if stock is None:
             return {}
 
-        # 최근 20일 일봉
+        # 최근 20일 일봉 (high, low 포함 — ATR 계산용) [J]
         price_rows = (
             db.query(PriceHistory)
             .filter(
@@ -121,11 +121,34 @@ class SellAnalyzer:
         prices = [
             {
                 "date": r.timestamp.strftime("%Y-%m-%d"),
+                "high": round(r.high, 2),
+                "low": round(r.low, 2),
                 "close": round(r.close, 2),
                 "volume": r.volume,
             }
             for r in price_rows
         ]
+
+        # ATR(14) 계산 [J]
+        atr_value = None
+        if len(price_rows) >= 15:
+            try:
+                import pandas as pd
+                import ta
+                df_atr = pd.DataFrame([
+                    {"high": r.high, "low": r.low, "close": r.close}
+                    for r in price_rows
+                ])
+                atr_series = ta.volatility.AverageTrueRange(
+                    high=df_atr["high"],
+                    low=df_atr["low"],
+                    close=df_atr["close"],
+                    window=14,
+                ).average_true_range()
+                last_atr = atr_series.iloc[-1]
+                atr_value = float(last_atr) if not pd.isna(last_atr) else None
+            except Exception as atr_err:
+                logger.debug(f"[{ticker}] ATR 계산 실패 (무시): {atr_err}")
 
         # 최신 기술적 지표
         ind = (
@@ -135,12 +158,31 @@ class SellAnalyzer:
             .first()
         )
 
-        # 최신 뉴스 5건
+        # AI 추천 stop_loss 조회 [D]
+        ai_stop_loss = None
+        latest_rec = (
+            db.query(AIRecommendation)
+            .filter(
+                AIRecommendation.stock_id == stock.id,
+                AIRecommendation.stop_loss.isnot(None),
+                AIRecommendation.action.in_(["BUY", "STRONG_BUY"]),
+            )
+            .order_by(AIRecommendation.recommendation_date.desc())
+            .first()
+        )
+        if latest_rec:
+            ai_stop_loss = latest_rec.stop_loss
+
+        # 최신 뉴스 7건 (30일 이내 필터) [N]
+        news_cutoff = datetime.now() - timedelta(days=30)
         news_rows = (
             db.query(MarketNews)
-            .filter(MarketNews.ticker == ticker)
+            .filter(
+                MarketNews.ticker == ticker,
+                MarketNews.published_at >= news_cutoff,
+            )
             .order_by(MarketNews.published_at.desc())
-            .limit(5)
+            .limit(7)
             .all()
         )
         news = [
@@ -180,6 +222,8 @@ class SellAnalyzer:
             "indicators": ind,
             "prices": prices,
             "news": news,
+            "ai_stop_loss": ai_stop_loss,
+            "atr": atr_value,
         }
 
     def _build_sell_prompt(self, context: dict) -> str:
@@ -264,11 +308,52 @@ class SellAnalyzer:
                 prompt_parts.append(f"- [{n.get('published_at', 'N/A')}] {n['title']} ({sentiment_str})")
             prompt_parts.append("")
 
-        # PnL 기반 특별 경고
+        # AI 추천 stop_loss 우선 활용 [D]
+        ai_stop_loss = context.get("ai_stop_loss")
+        if ai_stop_loss and current_price:
+            if current_price <= ai_stop_loss:
+                prompt_parts.append(
+                    f"🔴 CRITICAL: 현재가(${current_price:.2f})가 AI 추천 손절가(${ai_stop_loss:.2f}) 이하 — 즉각 손절 검토"
+                )
+            else:
+                sl_pct = (current_price - ai_stop_loss) / current_price * 100
+                prompt_parts.append(
+                    f"ℹ️ AI 추천 손절가: ${ai_stop_loss:.2f} (현재가 대비 -{sl_pct:.1f}% 하락 시 손절)"
+                )
+
+        # ATR 기반 동적 손절가 제안 [J]
+        atr = context.get("atr")
+        if atr and current_price:
+            atr_stop = current_price - (2 * atr)
+            atr_pct = (atr_stop - current_price) / current_price * 100
+            prompt_parts.extend([
+                "",
+                "## Volatility-Based Stop Loss (ATR):",
+                f"- ATR(14): ${atr:.2f}",
+                f"- ATR 기반 손절가 (2×ATR): ${atr_stop:.2f} (현재가 대비 {atr_pct:.1f}%)",
+                "",
+            ])
+
+        # PnL 기반 특별 경고 (AI stop_loss 보조 기준) [D, M]
         if pnl_pct <= -10:
-            prompt_parts.append(f"⚠️ CRITICAL: Position is down {pnl_pct:.1f}%. Stop-loss consideration required.")
-        elif pnl_pct >= 30:
-            prompt_parts.append(f"💰 NOTE: Position has gained {pnl_pct:.1f}%. Consider taking profits.")
+            if not ai_stop_loss:
+                prompt_parts.append(
+                    f"⚠️ CRITICAL: Position is down {abs(pnl_pct):.1f}%. Stop-loss -10% 기준 초과 — 손절 검토 필요."
+                )
+        elif pnl_pct > 0:
+            # 보유기간별 차등 이익실현 임계값 [M]
+            if holding_days < 30 and pnl_pct >= 15:
+                prompt_parts.append(
+                    f"💰 SHORT-TERM ALERT: {holding_days}일 보유 중 +{pnl_pct:.1f}% 단기 급등 — 이익실현 고려 (단기 임계값: +15%)"
+                )
+            elif 30 <= holding_days <= 180 and pnl_pct >= 25:
+                prompt_parts.append(
+                    f"💰 MID-TERM NOTE: {holding_days}일 보유 중 +{pnl_pct:.1f}% 달성 — 이익실현 고려 (중기 임계값: +25%)"
+                )
+            elif holding_days > 180 and pnl_pct >= 40:
+                prompt_parts.append(
+                    f"💰 LONG-TERM NOTE: {holding_days}일 보유 중 +{pnl_pct:.1f}% 달성 — 이익실현 고려 (장기 임계값: +40%)"
+                )
 
         prompt_parts.append("\nBased on all the above data, provide your sell signal recommendation as JSON.")
 

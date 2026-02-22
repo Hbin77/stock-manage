@@ -95,12 +95,7 @@ class Backtester:
                     logger.warning(f"[백테스팅] 비정상 추천가 스킵: rec_id={rec.id} price={price_at_rec}")
                     continue
 
-                # 추천일 + 최대 윈도우 일수 이후여야 처리 가능
-                max_window = max(windows)
-                if today < rec_date + timedelta(days=max_window):
-                    continue
-
-                # 가장 빠른 윈도우부터 시도
+                # 가장 빠른 윈도우부터 시도 (각 윈도우 독립 체크)
                 outcome_close = None
                 for days in sorted(windows):
                     target_date = rec_date + timedelta(days=days)

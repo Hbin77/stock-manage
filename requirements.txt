@@ -30,6 +30,9 @@ ta==0.11.0
 # 로깅
 loguru==0.7.3
 
+# 감성 분석
+vaderSentiment>=3.3.2
+
 # 유틸리티
 pytz==2025.1
 tqdm==4.67.1

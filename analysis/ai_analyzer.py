@@ -4,7 +4,7 @@ Google Gemini API를 사용하여 관심 종목의 매수 추천을 생성하고
 AIRecommendation 테이블에 저장합니다.
 """
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 
@@ -102,13 +102,17 @@ class AIAnalyzer:
             for r in price_rows
         ]
 
-        # 최신 기술적 지표
-        ind = (
+        # 최신 기술적 지표 2개 (현재 + 전일, MACD 방향 전환 감지용) [E]
+        ind_rows = (
             db.query(TechnicalIndicator)
             .filter(TechnicalIndicator.stock_id == stock.id)
             .order_by(TechnicalIndicator.date.desc())
-            .first()
+            .limit(2)
+            .all()
         )
+        ind = ind_rows[0] if ind_rows else None
+        prev_ind = ind_rows[1] if len(ind_rows) > 1 else None
+
         indicators = {}
         if ind:
             indicators = {
@@ -125,13 +129,26 @@ class AIAnalyzer:
                 "ma_200": round(ind.ma_200, 2) if ind.ma_200 else None,
                 "volume_ma_20": round(ind.volume_ma_20, 0) if ind.volume_ma_20 else None,
             }
+            # MACD 방향 전환 감지 [E]
+            macd_crossover = None
+            if ind.macd_hist is not None and prev_ind and prev_ind.macd_hist is not None:
+                if prev_ind.macd_hist <= 0 and ind.macd_hist > 0:
+                    macd_crossover = "GOLDEN_CROSS"
+                elif prev_ind.macd_hist >= 0 and ind.macd_hist < 0:
+                    macd_crossover = "DEAD_CROSS"
+            indicators["macd_crossover"] = macd_crossover
+            indicators["prev_macd_hist"] = round(prev_ind.macd_hist, 4) if prev_ind and prev_ind.macd_hist else None
 
-        # 최신 뉴스 5건
+        # 최신 뉴스 7건 (30일 이내 필터) [N]
+        news_cutoff = datetime.now() - timedelta(days=30)
         news_rows = (
             db.query(MarketNews)
-            .filter(MarketNews.ticker == ticker)
+            .filter(
+                MarketNews.ticker == ticker,
+                MarketNews.published_at >= news_cutoff,
+            )
             .order_by(MarketNews.published_at.desc())
-            .limit(5)
+            .limit(7)
             .all()
         )
         news = [
@@ -154,12 +171,71 @@ class AIAnalyzer:
             "exchange": stock.exchange,
         }
 
+        # 백테스팅 과거 성과 (lazy import, 순환 임포트 방지) [C]
+        past_performance = {}
+        try:
+            from analysis.backtester import backtester as _backtester
+            accuracy = _backtester.get_accuracy_stats(days=90)
+            breakdown = _backtester.get_action_breakdown(days=90)
+            past_performance = {
+                "overall": {
+                    "total": accuracy.get("total_recommendations"),
+                    "with_outcomes": accuracy.get("with_outcomes"),
+                    "win_rate": accuracy.get("win_rate"),
+                    "avg_return": accuracy.get("avg_return"),
+                    "sharpe_proxy": accuracy.get("sharpe_proxy"),
+                },
+                "by_action": breakdown,
+            }
+        except Exception as e:
+            logger.debug(f"[{ticker}] 과거 성과 조회 실패 (무시): {e}")
+
+        # 시장 국면 데이터 (SPY, QQQ, ^VIX) [G]
+        market_context = {}
+        try:
+            from data_fetcher.market_data import market_fetcher as _mf
+            for symbol in ["SPY", "QQQ", "^VIX"]:
+                data = _mf.fetch_realtime_price(symbol)
+                if data:
+                    market_context[symbol] = {
+                        "price": data["price"],
+                        "change_pct": data["change_pct"],
+                    }
+        except Exception as e:
+            logger.debug(f"[{ticker}] 시장 국면 데이터 조회 실패 (무시): {e}")
+
+        # 실적발표일 조회 [K]
+        earnings_warning = None
+        try:
+            import yfinance as yf
+            yt = yf.Ticker(ticker)
+            ed = getattr(yt.fast_info, "earnings_date", None)
+            if ed is None:
+                cal = yt.calendar
+                if cal is not None and "Earnings Date" in cal:
+                    ed_list = cal["Earnings Date"]
+                    if ed_list:
+                        ed = ed_list[0] if hasattr(ed_list, "__iter__") else ed_list
+            if ed is not None:
+                if hasattr(ed, "tzinfo") and ed.tzinfo:
+                    ed = ed.replace(tzinfo=None)
+                days_until = (ed - datetime.now()).days
+                if 0 <= days_until <= 7:
+                    earnings_warning = f"⚠️ EARNINGS IN {days_until} DAYS ({ed.strftime('%Y-%m-%d')})"
+                elif days_until > 7:
+                    earnings_warning = f"다음 실적발표: {ed.strftime('%Y-%m-%d')} ({days_until}일 후)"
+        except Exception:
+            pass
+
         return {
             "stock": stock_info,
             "prices": prices,
             "indicators": indicators,
             "news": news,
             "current_price": prices[-1]["close"] if prices else None,
+            "past_performance": past_performance,
+            "market_context": market_context,
+            "earnings_warning": earnings_warning,
         }
 
     def _build_prompt(self, context: dict) -> str:
@@ -188,6 +264,7 @@ class AIAnalyzer:
             # 기술적 신호 요약
             rsi = ind.get("rsi_14")
             macd_hist = ind.get("macd_hist")
+            macd_crossover = ind.get("macd_crossover")
             bb_upper = ind.get("bb_upper")
             bb_lower = ind.get("bb_lower")
             ma_20 = ind.get("ma_20")
@@ -201,7 +278,12 @@ class AIAnalyzer:
                     signals.append(f"RSI={rsi:.1f} (OVERBOUGHT - caution)")
                 else:
                     signals.append(f"RSI={rsi:.1f} (neutral)")
-            if macd_hist is not None:
+            # MACD: 방향 전환 우선 표시 [E]
+            if macd_crossover == "GOLDEN_CROSS":
+                signals.append(f"MACD Histogram: GOLDEN CROSS 발생 ({macd_hist:.4f}) — 강한 매수 신호")
+            elif macd_crossover == "DEAD_CROSS":
+                signals.append(f"MACD Histogram: DEAD CROSS 발생 ({macd_hist:.4f}) — 하락 전환 주의")
+            elif macd_hist is not None:
                 signals.append(f"MACD Histogram={'positive' if macd_hist > 0 else 'negative'} ({macd_hist:.4f})")
             if current_price and bb_upper and bb_lower:
                 bb_pct = (current_price - bb_lower) / (bb_upper - bb_lower) * 100 if (bb_upper - bb_lower) != 0 else 50
@@ -215,6 +297,49 @@ class AIAnalyzer:
 
             if signals:
                 prompt_parts.extend(["## Technical Signal Summary:", *[f"- {s}" for s in signals], ""])
+
+        # 시장 국면 [G]
+        market_ctx = context.get("market_context", {})
+        if market_ctx:
+            market_lines = ["## Market Context:"]
+            spy = market_ctx.get("SPY")
+            qqq = market_ctx.get("QQQ")
+            vix = market_ctx.get("^VIX")
+            if spy:
+                trend = "상승" if spy["change_pct"] > 0 else "하락"
+                market_lines.append(f"- SPY: ${spy['price']:.2f} ({spy['change_pct']:+.2f}%) — {trend}")
+            if qqq:
+                trend = "상승" if qqq["change_pct"] > 0 else "하락"
+                market_lines.append(f"- QQQ: ${qqq['price']:.2f} ({qqq['change_pct']:+.2f}%) — {trend}")
+            if vix:
+                vix_level = "HIGH(공포)" if vix["price"] > 30 else ("ELEVATED(경계)" if vix["price"] > 20 else "LOW(안정)")
+                market_lines.append(f"- VIX: {vix['price']:.2f} ({vix_level})")
+            prompt_parts.extend(market_lines + [""])
+
+        # 실적발표일 경고 [K]
+        earnings_warning = context.get("earnings_warning")
+        if earnings_warning:
+            prompt_parts.extend([f"## Earnings Alert: {earnings_warning}", ""])
+
+        # 백테스팅 과거 성과 [C]
+        past_perf = context.get("past_performance", {})
+        overall = past_perf.get("overall", {})
+        if overall.get("with_outcomes", 0) and overall["with_outcomes"] > 0:
+            perf_lines = [
+                "## AI Past Performance (last 90 days):",
+                f"- Recommendations with outcomes: {overall['with_outcomes']}",
+            ]
+            if overall.get("win_rate") is not None:
+                perf_lines.append(f"- Win rate: {overall['win_rate']:.1f}%")
+            if overall.get("avg_return") is not None:
+                perf_lines.append(f"- Avg return: {overall['avg_return']:.2f}%")
+            if past_perf.get("by_action"):
+                perf_lines.append("- By action:")
+                for ab in past_perf["by_action"]:
+                    perf_lines.append(
+                        f"  - {ab['action']}: win_rate={ab['win_rate']:.1f}%, avg_return={ab['avg_return']:.2f}%"
+                    )
+            prompt_parts.extend(perf_lines + [""])
 
         if news:
             prompt_parts.append("## Recent News (sentiment: -1.0 negative to +1.0 positive):")
@@ -301,6 +426,15 @@ class AIAnalyzer:
             except Exception as e:
                 logger.error(f"[{ticker}] AI API 호출 실패: {e}")
                 return None
+
+            # 신뢰도 임계값 미달 시 HOLD로 다운그레이드 [A]
+            threshold = settings.BUY_CONFIDENCE_THRESHOLD
+            if parsed["action"] in ("BUY", "STRONG_BUY") and parsed["confidence"] < threshold:
+                logger.info(
+                    f"[{ticker}] 신뢰도 {parsed['confidence']:.0%} < 임계값 {threshold:.0%} "
+                    f"→ HOLD 다운그레이드 (원래: {parsed['action']})"
+                )
+                parsed["action"] = "HOLD"
 
             # DB 저장
             rec = AIRecommendation(
@@ -389,9 +523,21 @@ class AIAnalyzer:
                     elif ind.rsi_14 < 45:
                         score += 1.0
 
-                # MACD 히스토그램 양전환 신호
+                # MACD 방향 전환 스코어링 [E]
                 if ind.macd_hist is not None and ind.macd_hist > 0:
-                    score += 2.0
+                    prev_ind_row = (
+                        db.query(TechnicalIndicator)
+                        .filter(
+                            TechnicalIndicator.stock_id == stock.id,
+                            TechnicalIndicator.date < ind.date,
+                        )
+                        .order_by(TechnicalIndicator.date.desc())
+                        .first()
+                    )
+                    if prev_ind_row and prev_ind_row.macd_hist is not None and prev_ind_row.macd_hist <= 0:
+                        score += 3.0  # 골든크로스 발생 (전환점)
+                    else:
+                        score += 2.0  # 양수 유지 (상승 모멘텀)
 
                 # 이동평균 신호
                 if current_price and ind.ma_20 and current_price > ind.ma_20:
@@ -399,12 +545,23 @@ class AIAnalyzer:
                 if current_price and ind.ma_50 and current_price > ind.ma_50:
                     score += 1.0
 
-                # 볼린저밴드 하단 근처
+                # MA200 장기 추세 스코어링 [F]
+                if current_price and ind.ma_200:
+                    if current_price > ind.ma_200:
+                        score += 2.0   # 장기 상승 추세
+                    else:
+                        score -= 1.0   # 장기 하락 추세 페널티
+
+                # 볼린저밴드 하단 근처 — 거래량 조건부 스코어링 [H]
                 if (current_price and ind.bb_upper and ind.bb_lower and
                         (ind.bb_upper - ind.bb_lower) > 0):
                     bb_pct = (current_price - ind.bb_lower) / (ind.bb_upper - ind.bb_lower) * 100
                     if bb_pct < 25:
-                        score += 2.0
+                        latest_volume = latest_price_row.volume if latest_price_row else None
+                        if latest_volume and ind.volume_ma_20 and latest_volume < ind.volume_ma_20:
+                            score += 1.0   # 거래량 감소: 하락 지속 가능
+                        else:
+                            score += 2.0   # 거래량 정상/증가: 반등 신호 유효
 
                 if score > 0:
                     scores[ticker] = score

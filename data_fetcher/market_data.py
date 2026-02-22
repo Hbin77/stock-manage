@@ -326,6 +326,14 @@ class MarketDataFetcher:
         종목 관련 최신 뉴스를 수집하여 DB에 저장합니다.
         반환값: 저장된 뉴스 수
         """
+        # VADER 감성 분석기 초기화 (루프 밖, 재사용)
+        try:
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            _sia = SentimentIntensityAnalyzer()
+        except ImportError:
+            _sia = None
+            logger.warning("[뉴스] vaderSentiment 미설치 — 감성 점수 수집 불가")
+
         try:
             t = self._get_ticker(ticker)
             news_list = t.news  # 최대 10개 뉴스 반환
@@ -349,6 +357,15 @@ class MarketDataFetcher:
                     else None
                 )
 
+                # VADER 감성 점수 계산 (title + summary 합산)
+                sentiment_score = None
+                if _sia:
+                    text = item.get("title", "")
+                    if item.get("summary"):
+                        text += " " + item["summary"]
+                    scores = _sia.polarity_scores(text)
+                    sentiment_score = round(scores["compound"], 4)
+
                 news = MarketNews(
                     ticker=ticker,
                     title=item.get("title", "")[:500],
@@ -356,6 +373,7 @@ class MarketDataFetcher:
                     url=url,
                     source=item.get("publisher"),
                     published_at=published_dt,
+                    sentiment=sentiment_score,
                 )
                 db.add(news)
                 saved += 1

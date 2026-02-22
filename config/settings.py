@@ -37,14 +37,34 @@ class Settings:
     )
 
     # --- 모니터링 종목 ---
-    # 환경변수 WATCHLIST_TICKERS가 있으면 사용, 없으면 NASDAQ100+SP500 전체
+    # 포트폴리오 보유 종목을 우선 사용 (DB 조회)
+    # DB가 없거나 보유 종목이 없을 경우 WATCHLIST_TICKERS 환경변수로 폴백
     @property
     def WATCHLIST_TICKERS(self) -> list[str]:
-        from config.tickers import ALL_TICKERS
+        try:
+            from database.connection import SessionLocal
+            from database.models import PortfolioHolding, Stock
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(Stock.ticker)
+                    .join(PortfolioHolding, PortfolioHolding.stock_id == Stock.id)
+                    .filter(PortfolioHolding.quantity > 0)
+                    .all()
+                )
+                if rows:
+                    return [r.ticker for r in rows]
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+        # 폴백: 환경변수 (최초 init 시 또는 포트폴리오가 비어있을 때)
         raw = os.getenv("WATCHLIST_TICKERS", "")
         if raw.strip():
             return [t.strip() for t in raw.split(",") if t.strip()]
-        return ALL_TICKERS
+
+        return []
 
     # --- 스케줄 설정 ---
     FETCH_INTERVAL_MINUTES: int = int(os.getenv("FETCH_INTERVAL_MINUTES", "5"))

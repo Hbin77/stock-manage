@@ -120,6 +120,10 @@ def job_price_alert_check():
     if now.hour < 9 or (now.hour == 9 and now.minute < 30):
         logger.debug("[스케줄] 장 개장 전, 가격 알림 체크 스킵")
         return
+    # 16:00 이후 실행 시 스킵
+    if now.hour >= 16:
+        logger.debug("[스케줄] 장 마감 후, 가격 알림 체크 스킵")
+        return
     logger.debug(f"[스케줄] 가격 알림 체크 ({now.strftime('%H:%M')})")
     try:
         from notifications.alert_manager import alert_manager

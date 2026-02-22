@@ -4,29 +4,40 @@ services:
   # ─────────────────────────────────────────────
   scheduler:
     build: .
+    container_name: stock-manage-scheduler
     entrypoint: ["/app/docker-entrypoint.sh"]
     command: python main.py run
     env_file: .env
     environment:
+      # TZ: NAS 로컬 시간 (로그 타임스탬프용)
+      # 스케줄러 내부는 America/New_York 고정 (NYSE 기준)
+      TZ: ${TZ:-America/New_York}
       DATABASE_URL: sqlite:////app/data/stock_manage.db
       LOG_FILE: /app/logs/stock_manage.log
     volumes:
-      - stock_data:/app/data
-      - stock_logs:/app/logs
-    restart: unless-stopped
+      # NAS 경로: .env의 DATA_PATH / LOG_PATH로 지정
+      # 예) DATA_PATH=/volume1/docker/stock-manage/data
+      - ${DATA_PATH:-./data}:/app/data
+      - ${LOG_PATH:-./logs}:/app/logs
+    restart: always
     healthcheck:
-      # DB 파일이 생성되면 healthy
       test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/stock_manage.db') else 1)"]
       interval: 30s
       timeout: 10s
       retries: 10
       start_period: 120s  # 초기 데이터 로딩 시간 확보
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   # ─────────────────────────────────────────────
   # 대시보드: Streamlit UI (스케줄러 DB 초기화 완료 후 기동)
   # ─────────────────────────────────────────────
   dashboard:
     build: .
+    container_name: stock-manage-dashboard
     command: >
       streamlit run dashboard/app.py
       --server.port=8085
@@ -34,19 +45,22 @@ services:
       --server.headless=true
     env_file: .env
     environment:
+      TZ: ${TZ:-America/New_York}
       DATABASE_URL: sqlite:////app/data/stock_manage.db
       LOG_FILE: /app/logs/stock_manage.log
       STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
     volumes:
-      - stock_data:/app/data
-      - stock_logs:/app/logs
+      - ${DATA_PATH:-./data}:/app/data
+      - ${LOG_PATH:-./logs}:/app/logs
     ports:
-      - "8085:8085"
-    restart: unless-stopped
+      # NAS에서 포트 충돌 시 .env의 DASHBOARD_PORT로 변경
+      - "${DASHBOARD_PORT:-8085}:8085"
+    restart: always
     depends_on:
       scheduler:
         condition: service_healthy  # scheduler DB 초기화 완료 후 기동
-
-volumes:
-  stock_data:   # SQLite DB 영구 저장
-  stock_logs:   # 로그 파일 영구 저장
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
