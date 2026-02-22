@@ -35,6 +35,9 @@ class Settings:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
+    # --- 대시보드 ---
+    DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "")
+
     # --- 데이터베이스 ---
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL", f"sqlite:///{BASE_DIR}/stock_manage.db"

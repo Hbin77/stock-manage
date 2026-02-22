@@ -84,9 +84,31 @@ def sidebar_nav() -> str:
     return page
 
 
+# ── 로그인 ────────────────────────────────────────────────────────────────────
+def check_password() -> bool:
+    """비밀번호 확인. 통과 시 True 반환."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown("<h2 style='text-align:center'>🔒 로그인</h2>", unsafe_allow_html=True)
+    password = st.text_input("비밀번호를 입력하세요", type="password", key="pw_input")
+
+    if st.button("로그인", use_container_width=True):
+        if password == settings.DASHBOARD_PASSWORD:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 틀렸습니다.")
+    return False
+
+
 # ── 메인 앱 ──────────────────────────────────────────────────────────────────
 def main():
     inject_custom_css()
+
+    if settings.DASHBOARD_PASSWORD and not check_password():
+        return
+
     page = sidebar_nav()
 
     if page == "💼 포트폴리오":
