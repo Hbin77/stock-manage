@@ -67,20 +67,29 @@ def render():
     st.subheader("오늘의 추천")
     recs = _get_todays_recs()
 
-    if not recs:
-        st.info("오늘의 AI 분석 결과가 없습니다.")
+    # 분석 실행 버튼 (항상 표시)
+    btn_col, info_col = st.columns([1, 3])
+    with btn_col:
+        run_analysis = st.button("🔍 AI 분석 실행", type="primary")
+    with info_col:
         total_watchlist = len(settings.WATCHLIST_TICKERS)
         if total_watchlist > 50:
-            st.caption(f"현재 {total_watchlist}개 종목 모니터링 중 — AI 분석은 기술적 조건 상위 50개 종목에만 실행됩니다.")
-        if st.button("🔍 지금 AI 분석 실행", type="primary"):
-            with st.spinner("AI 분석 중... (우선순위 종목 선별 후 분석, 1~3분 소요)"):
-                try:
-                    ai_analyzer.analyze_all_watchlist()
-                    st.cache_data.clear()
-                    st.success("분석 완료! 페이지를 새로고침하세요.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"분석 실패: {e}")
+            st.caption(f"{total_watchlist}개 종목 중 기술적 조건 상위 50개 분석")
+        if recs:
+            st.caption(f"마지막 분석: {recs[0].get('recommendation_date', 'N/A')}")
+
+    if run_analysis:
+        with st.spinner("AI 분석 중... (우선순위 종목 선별 후 분석, 1~3분 소요)"):
+            try:
+                ai_analyzer.analyze_all_watchlist()
+                st.cache_data.clear()
+                st.success("분석 완료!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"분석 실패: {e}")
+
+    if not recs:
+        st.info("오늘의 AI 분석 결과가 없습니다. 위 버튼으로 분석을 실행하세요.")
     else:
         # ── 인덱스 그룹 필터 탭 ──────────────────────────────────────────────
         if _HAS_TICKER_INDEX:
