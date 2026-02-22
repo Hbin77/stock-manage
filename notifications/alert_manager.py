@@ -302,10 +302,15 @@ class AlertManager:
 
         try:
             from notifications.kakao import kakao_notifier
-            return kakao_notifier.send_price_alerts(all_alerts)
+            kakao_notifier.send_price_alerts(all_alerts)
         except Exception as e:
             logger.debug(f"[알림 매니저] 카카오 전송 스킵: {e}")
-            return True
+        try:
+            from notifications.telegram import telegram_notifier
+            telegram_notifier.send_price_alerts(all_alerts)
+        except Exception as e:
+            logger.debug(f"[알림 매니저] 텔레그램 전송 스킵: {e}")
+        return True
 
     def get_alert_history(self, days: int = 7) -> list[dict]:
         """

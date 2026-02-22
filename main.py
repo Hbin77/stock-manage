@@ -150,14 +150,21 @@ def cmd_sell_check():
 
 
 def cmd_notify_test():
-    """[notify_test] 카카오톡 연결 테스트"""
+    """[notify_test] 카카오톡 + 텔레그램 연결 테스트"""
     from notifications.kakao import kakao_notifier
+    from notifications.telegram import telegram_notifier
+
     logger.info("카카오톡 연결 테스트...")
-    success = kakao_notifier.test_connection()
-    if success:
+    if kakao_notifier.test_connection():
         logger.success("카카오톡 연결 테스트 성공!")
     else:
-        logger.error("카카오톡 연결 테스트 실패. KAKAO_ACCESS_TOKEN을 확인하세요.")
+        logger.warning("카카오톡 연결 테스트 실패 (KAKAO_ACCESS_TOKEN 확인)")
+
+    logger.info("텔레그램 연결 테스트...")
+    if telegram_notifier.test_connection():
+        logger.success("텔레그램 연결 테스트 성공!")
+    else:
+        logger.warning("텔레그램 연결 테스트 실패 (TELEGRAM_BOT_TOKEN/CHAT_ID 확인)")
 
 
 def main():

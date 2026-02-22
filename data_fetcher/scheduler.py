@@ -67,15 +67,20 @@ def job_daily_ai_analysis():
         buy_count = sum(1 for a in results.values() if a in ("BUY", "STRONG_BUY"))
         logger.success(f"[스케줄] AI 매수 분석 완료 — 매수 추천: {buy_count}개")
 
-        # 카카오 알림 (설정된 경우)
-        try:
-            from notifications.kakao import kakao_notifier
-            if buy_count > 0:
-                recs = ai_analyzer.get_todays_recommendations()
-                buy_recs = [r for r in recs if r["action"] in ("BUY", "STRONG_BUY")]
+        # 알림 전송 (카카오 + 텔레그램)
+        if buy_count > 0:
+            recs = ai_analyzer.get_todays_recommendations()
+            buy_recs = [r for r in recs if r["action"] in ("BUY", "STRONG_BUY")]
+            try:
+                from notifications.kakao import kakao_notifier
                 kakao_notifier.send_buy_recommendations(buy_recs)
-        except Exception as notify_err:
-            logger.debug(f"[스케줄] 카카오 알림 스킵: {notify_err}")
+            except Exception as e:
+                logger.debug(f"[스케줄] 카카오 알림 스킵: {e}")
+            try:
+                from notifications.telegram import telegram_notifier
+                telegram_notifier.send_buy_recommendations(buy_recs)
+            except Exception as e:
+                logger.debug(f"[스케줄] 텔레그램 알림 스킵: {e}")
     except Exception as e:
         logger.error(f"[스케줄] AI 매수 분석 실패: {e}")
 
@@ -89,15 +94,20 @@ def job_sell_analysis():
         sell_count = sum(1 for s in results.values() if s in ("SELL", "STRONG_SELL"))
         logger.success(f"[스케줄] AI 매도 분석 완료 — 매도 신호: {sell_count}개")
 
-        # 카카오 알림 (설정된 경우)
-        try:
-            from notifications.kakao import kakao_notifier
-            if sell_count > 0:
-                signals = sell_analyzer.get_active_sell_signals()
-                sell_sigs = [s for s in signals if s["signal"] in ("SELL", "STRONG_SELL")]
+        # 알림 전송 (카카오 + 텔레그램)
+        if sell_count > 0:
+            signals = sell_analyzer.get_active_sell_signals()
+            sell_sigs = [s for s in signals if s["signal"] in ("SELL", "STRONG_SELL")]
+            try:
+                from notifications.kakao import kakao_notifier
                 kakao_notifier.send_sell_signals(sell_sigs)
-        except Exception as notify_err:
-            logger.debug(f"[스케줄] 카카오 알림 스킵: {notify_err}")
+            except Exception as e:
+                logger.debug(f"[스케줄] 카카오 알림 스킵: {e}")
+            try:
+                from notifications.telegram import telegram_notifier
+                telegram_notifier.send_sell_signals(sell_sigs)
+            except Exception as e:
+                logger.debug(f"[스케줄] 텔레그램 알림 스킵: {e}")
     except Exception as e:
         logger.error(f"[스케줄] AI 매도 분석 실패: {e}")
 
@@ -133,14 +143,19 @@ def job_price_alert_check():
 
 
 def job_daily_portfolio_summary():
-    """일일 포트폴리오 요약 카카오 알림 (평일 장 마감 후 16:35)"""
+    """일일 포트폴리오 요약 알림 (평일 장 마감 후 16:35)"""
     logger.info("[스케줄] 포트폴리오 요약 알림 시작")
     try:
         from notifications.kakao import kakao_notifier
         kakao_notifier.send_daily_summary()
-        logger.success("[스케줄] 포트폴리오 요약 알림 전송 완료")
     except Exception as e:
-        logger.error(f"[스케줄] 포트폴리오 요약 알림 실패: {e}")
+        logger.debug(f"[스케줄] 카카오 요약 알림 스킵: {e}")
+    try:
+        from notifications.telegram import telegram_notifier
+        telegram_notifier.send_daily_summary()
+    except Exception as e:
+        logger.debug(f"[스케줄] 텔레그램 요약 알림 스킵: {e}")
+    logger.success("[스케줄] 포트폴리오 요약 알림 전송 완료")
 
 
 # ─────────────────────────────────────────
