@@ -133,7 +133,7 @@ def render():
 
     # ── 3. 거래 입력 폼 ──────────────────────────────────────────────────────
     st.subheader("📝 거래 입력")
-    buy_tab, sell_tab = st.tabs(["매수", "매도"])
+    buy_tab, sell_tab, delete_tab = st.tabs(["매수", "매도", "삭제"])
 
     with buy_tab:
         with st.form("buy_form", clear_on_submit=True):
@@ -224,6 +224,31 @@ def render():
                     st.rerun()
                 except Exception as e:
                     st.toast(f"매도 실패: {e}", icon="❌")
+
+    with delete_tab:
+        if not holdings:
+            st.info("보유 종목이 없습니다.")
+        else:
+            st.warning("⚠️ 삭제하면 보유 현황에서 완전히 제거됩니다. 거래 이력은 보존됩니다.")
+            del_options = {f"{h['ticker']} - {h['name']} ({h['quantity']:.4f}주)": h["ticker"] for h in holdings}
+            selected_del = st.selectbox("삭제할 종목 선택", list(del_options.keys()), key="del_ticker")
+            del_ticker = del_options[selected_del]
+            del_holding = next(h for h in holdings if h["ticker"] == del_ticker)
+
+            dc1, dc2, dc3 = st.columns(3)
+            dc1.metric("보유 수량", f"{del_holding['quantity']:.4f}주")
+            dc2.metric("평균 매수가", f"${del_holding['avg_buy_price']:.2f}")
+            dc3.metric("평가손익", f"${del_holding['unrealized_pnl']:+,.2f}")
+
+            confirm = st.checkbox(f"**{del_ticker}** 종목을 삭제합니다", key="del_confirm")
+            if st.button("종목 삭제", type="primary", disabled=not confirm, key="del_btn"):
+                ok = portfolio_manager.delete_holding(del_ticker)
+                if ok:
+                    st.toast(f"{del_ticker} 포트폴리오에서 삭제 완료!", icon="🗑️")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.toast(f"{del_ticker} 삭제 실패. 로그를 확인하세요.", icon="❌")
 
     st.divider()
 

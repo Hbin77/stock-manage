@@ -378,6 +378,50 @@ class PortfolioManager:
             reverse=True,
         )
 
+    # ─────────────────────────────────────────
+    # 종목 삭제 (포트폴리오에서 제거)
+    # ─────────────────────────────────────────
+    def delete_holding(self, ticker: str) -> bool:
+        """
+        보유 종목을 포트폴리오에서 완전히 삭제합니다.
+        거래 내역(Transaction)은 보존하고, 보유 현황(PortfolioHolding)과
+        관련 알림(PriceAlert)만 삭제합니다.
+
+        Args:
+            ticker: 종목 코드
+
+        Returns:
+            True: 삭제 성공, False: 종목 미보유
+        """
+        with get_db() as db:
+            stock = db.query(Stock).filter(Stock.ticker == ticker).first()
+            if stock is None:
+                logger.warning(f"[삭제] 종목을 찾을 수 없음: {ticker}")
+                return False
+
+            holding = (
+                db.query(PortfolioHolding)
+                .filter(PortfolioHolding.stock_id == stock.id)
+                .first()
+            )
+            if holding is None:
+                logger.warning(f"[삭제] 보유하지 않은 종목: {ticker}")
+                return False
+
+            # 관련 알림 삭제
+            try:
+                from database.models import PriceAlert
+                db.query(PriceAlert).filter(PriceAlert.stock_id == stock.id).delete()
+            except Exception:
+                pass
+
+            db.delete(holding)
+            logger.success(
+                f"[삭제] {ticker} ({stock.name}) 포트폴리오에서 제거 완료 "
+                f"(수량: {holding.quantity}주, 투자금: ${holding.total_invested:.2f})"
+            )
+            return True
+
     def print_summary(self) -> None:
         """포트폴리오 현황을 콘솔에 출력합니다."""
         summary = self.get_summary()
