@@ -34,7 +34,7 @@ class RiskManager:
                 if stock and stock.ticker == ticker:
                     return {"allowed": False, "reason": f"이미 보유 중인 종목", "max_amount_pct": 0}
 
-            # 3. 섹터 집중도 확인
+            # 3. 섹터 집중도 확인 (종목 수 기반)
             if sector:
                 sector_count = 0
                 for h in holdings:
@@ -45,6 +45,22 @@ class RiskManager:
                 max_per_sector = max(3, self.MAX_HOLDINGS // 3)
                 if sector_count >= max_per_sector:
                     return {"allowed": False, "reason": f"섹터({sector}) 집중도 초과 ({sector_count}개)", "max_amount_pct": 0}
+
+            # 4. 섹터 집중도 확인 (금액 비중 기반)
+            if sector:
+                total_value = 0
+                sector_value = 0
+                for h in holdings:
+                    stock_h = db.query(Stock).filter(Stock.id == h.stock_id).first()
+                    holding_value = (h.quantity or 0) * (h.current_price or h.avg_buy_price or 0)
+                    total_value += holding_value
+                    if stock_h and stock_h.sector == sector:
+                        sector_value += holding_value
+
+                if total_value > 0:
+                    sector_pct = sector_value / total_value
+                    if sector_pct >= self.MAX_SECTOR_PCT:
+                        return {"allowed": False, "reason": f"섹터({sector}) 금액 비중 {sector_pct:.0%} >= {self.MAX_SECTOR_PCT:.0%}", "max_amount_pct": 0}
 
             return {
                 "allowed": True,

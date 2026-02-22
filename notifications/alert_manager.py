@@ -49,8 +49,14 @@ class _AlertCondition:
 class AlertManager:
     """가격 알림 체크 및 발송 매니저"""
 
-    COOLDOWN_MINUTES = 60
-    TRAILING_STOP_PCT = 0.10  # 최고가 대비 -10% 하락 시 트레일링 스톱 발동
+    COOLDOWN_MINUTES = 60  # 기본 쿨다운 (COOLDOWN_MAP에 없는 유형용)
+    COOLDOWN_MAP = {
+        "STOP_LOSS": 15,       # 손절 알림은 15분마다
+        "TRAILING_STOP": 15,   # 트레일링 스톱도 15분
+        "TARGET_PRICE": 60,    # 목표가는 60분
+        "VOLUME_SURGE": 360,   # 거래량 급등은 하루에 ~1회
+    }
+    TRAILING_STOP_PCT = 0.10  # 최고가 대비 -10% 하락 시 트레일링 스톱 발동 (ATR 없을 때 기본값)
 
     # ── 내부 유틸리티 ──────────────────────────────────────────────────────────
 
@@ -58,8 +64,9 @@ class AlertManager:
         return datetime.now(timezone.utc).replace(tzinfo=None)
 
     def _is_in_cooldown(self, db, stock_id: int, alert_type: str) -> bool:
-        """마지막 발화 후 COOLDOWN_MINUTES 이내이면 True"""
-        cutoff = self._now() - timedelta(minutes=self.COOLDOWN_MINUTES)
+        """마지막 발화 후 유형별 쿨다운 시간 이내이면 True"""
+        cooldown_minutes = self.COOLDOWN_MAP.get(alert_type, self.COOLDOWN_MINUTES)
+        cutoff = self._now() - timedelta(minutes=cooldown_minutes)
         recent = (
             db.query(AlertHistory)
             .filter(
@@ -238,8 +245,22 @@ class AlertManager:
                     )
 
                     if high_watermark_row and high_watermark_row > 0:
+                        # ATR 기반 동적 트레일링 스톱 계산
+                        dynamic_pct = self.TRAILING_STOP_PCT  # 기본값 10%
+                        try:
+                            stock_for_atr = db.query(Stock).filter(Stock.ticker == stock.ticker).first()
+                            if stock_for_atr:
+                                ind_for_atr = db.query(TechnicalIndicator).filter(
+                                    TechnicalIndicator.stock_id == stock_for_atr.id
+                                ).order_by(TechnicalIndicator.date.desc()).first()
+                                if ind_for_atr and hasattr(ind_for_atr, 'atr_14') and ind_for_atr.atr_14 and current_price > 0:
+                                    dynamic_pct = (3 * ind_for_atr.atr_14) / current_price
+                                    dynamic_pct = max(0.05, min(0.20, dynamic_pct))  # 5%~20% 범위
+                        except Exception:
+                            pass  # 실패시 기본 10% 사용
+
                         drawdown = (current_price - high_watermark_row) / high_watermark_row
-                        if drawdown <= -self.TRAILING_STOP_PCT:
+                        if drawdown <= -dynamic_pct:
                             result = self._fire_alert(
                                 db, stock, "TRAILING_STOP",
                                 current_price, high_watermark_row,

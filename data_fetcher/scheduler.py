@@ -25,16 +25,63 @@ from data_fetcher.market_data import market_fetcher
 
 
 # ─────────────────────────────────────────
+# NYSE 영업일 체크 헬퍼
+# ─────────────────────────────────────────
+
+
+def _is_nyse_trading_day() -> bool:
+    """오늘이 NYSE 영업일인지 확인 (주말 + 미국 공휴일 제외)"""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+
+    # 주말 체크
+    if now.weekday() >= 5:
+        return False
+
+    # 미국 주요 공휴일 (고정일 + 변동일 근사)
+    month, day = now.month, now.day
+    year = now.year
+
+    # 고정 공휴일
+    fixed_holidays = [
+        (1, 1),   # New Year's Day
+        (6, 19),  # Juneteenth
+        (7, 4),   # Independence Day
+        (12, 25), # Christmas Day
+    ]
+    if (month, day) in fixed_holidays:
+        return False
+
+    # 변동 공휴일 (근사치 — 정확한 날짜는 매년 다름)
+    weekday = now.weekday()  # 0=Monday
+    # MLK Day: 1월 셋째 월요일
+    if month == 1 and weekday == 0 and 15 <= day <= 21:
+        return False
+    # Presidents Day: 2월 셋째 월요일
+    if month == 2 and weekday == 0 and 15 <= day <= 21:
+        return False
+    # Memorial Day: 5월 마지막 월요일
+    if month == 5 and weekday == 0 and day >= 25:
+        return False
+    # Labor Day: 9월 첫째 월요일
+    if month == 9 and weekday == 0 and day <= 7:
+        return False
+    # Thanksgiving: 11월 넷째 목요일
+    if month == 11 and weekday == 3 and 22 <= day <= 28:
+        return False
+
+    return True
+
+
+# ─────────────────────────────────────────
 # 스케줄 작업 함수 정의
 # ─────────────────────────────────────────
 
 
 def job_realtime_price_update():
     """현재가 갱신 작업 (N분마다 실행)"""
-    from zoneinfo import ZoneInfo
-    now = datetime.now(ZoneInfo("America/New_York"))
-    if now.weekday() >= 5:  # 토요일=5, 일요일=6
-        logger.debug("[스케줄] 주말, 실시간 가격 갱신 스킵")
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, 실시간 가격 갱신 스킵")
         return {}
     logger.debug(f"[스케줄] 실시간 가격 갱신 시작 ({datetime.now().strftime('%H:%M:%S')})")
     prices = market_fetcher.fetch_all_realtime_prices()
@@ -44,13 +91,21 @@ def job_realtime_price_update():
 
 def job_daily_price_update():
     """일봉 데이터 저장 (매일 장 마감 후)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, 일봉 업데이트 스킵")
+        return
     logger.info("[스케줄] 일봉 데이터 업데이트 시작")
     result = market_fetcher.update_daily_prices()
     logger.success(f"[스케줄] 일봉 데이터 업데이트 완료: {result}")
 
 
 def job_news_fetch():
-    """뉴스 수집 (매시간)"""
+    """뉴스 수집 (매시간, 주말은 스킵)"""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5:
+        logger.debug("[스케줄] 주말, 뉴스 수집 스킵")
+        return
     logger.debug("[스케줄] 뉴스 수집 시작")
     count = market_fetcher.fetch_all_news()
     logger.info(f"[스케줄] 뉴스 수집 완료: {count}건")
@@ -65,6 +120,9 @@ def job_stock_info_sync():
 
 def job_daily_ai_analysis():
     """AI 매수 추천 분석 (평일 장전 08:30)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, AI 매수 분석 스킵")
+        return
     logger.info("[스케줄] AI 매수 분석 시작")
     try:
         from analysis.ai_analyzer import ai_analyzer
@@ -92,6 +150,9 @@ def job_daily_ai_analysis():
 
 def job_sell_analysis():
     """보유 종목 매도 신호 분석 (평일 장 시작 후 09:30)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, AI 매도 분석 스킵")
+        return
     logger.info("[스케줄] AI 매도 신호 분석 시작")
     try:
         from analysis.sell_analyzer import sell_analyzer
@@ -119,6 +180,9 @@ def job_sell_analysis():
 
 def job_update_backtesting():
     """백테스팅 결과 업데이트 (매일 17:00 ET — 장 마감 후 충분한 시간 경과 후)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, 백테스팅 업데이트 스킵")
+        return
     logger.info("[스케줄] 백테스팅 결과 업데이트 시작")
     try:
         from analysis.backtester import backtester
@@ -130,6 +194,9 @@ def job_update_backtesting():
 
 def job_price_alert_check():
     """가격 알림 체크 (장중 5분마다 09:30~16:00)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, 가격 알림 체크 스킵")
+        return
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo("America/New_York"))
     # 09:30 이전 실행 시 스킵
@@ -150,6 +217,9 @@ def job_price_alert_check():
 
 def job_daily_portfolio_summary():
     """일일 포트폴리오 요약 알림 (평일 장 마감 후 16:35)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, 포트폴리오 요약 스킵")
+        return
     logger.info("[스케줄] 포트폴리오 요약 알림 시작")
     try:
         from notifications.kakao import kakao_notifier
@@ -162,6 +232,20 @@ def job_daily_portfolio_summary():
     except Exception as e:
         logger.debug(f"[스케줄] 텔레그램 요약 알림 스킵: {e}")
     logger.success("[스케줄] 포트폴리오 요약 알림 전송 완료")
+
+
+def job_technical_calc():
+    """기술 지표 계산 (매일 장 마감 후 16:45 ET — 일봉 데이터 저장 후)"""
+    if not _is_nyse_trading_day():
+        logger.debug("[스케줄] 휴장일, 기술 지표 계산 스킵")
+        return
+    logger.info("[스케줄] 기술 지표 계산 시작")
+    try:
+        from analysis.technical_analysis import technical_analyzer
+        results = technical_analyzer.calculate_all()
+        logger.success(f"[스케줄] 기술 지표 계산 완료: {results}")
+    except Exception as e:
+        logger.error(f"[스케줄] 기술 지표 계산 실패: {e}")
 
 
 # ─────────────────────────────────────────
@@ -274,6 +358,15 @@ class DataScheduler:
             replace_existing=True,
         )
 
+        # 10. 기술 지표 계산 (평일 16:45 — 일봉 저장 15분 후)
+        self._scheduler.add_job(
+            job_technical_calc,
+            trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=45),
+            id="technical_calc",
+            name="기술 지표 계산 (장 마감 후)",
+            replace_existing=True,
+        )
+
         logger.info("스케줄 작업 등록 완료:")
         for job in self._scheduler.get_jobs():
             logger.info(f"  - [{job.id}] {job.name}")
@@ -314,6 +407,7 @@ class DataScheduler:
             "daily_portfolio_summary": job_daily_portfolio_summary,
             "update_backtesting": job_update_backtesting,
             "price_alert_check": job_price_alert_check,
+            "technical_calc": job_technical_calc,
         }
         fn = job_map.get(job_id)
         if fn is None:

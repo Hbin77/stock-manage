@@ -232,6 +232,20 @@ class SellAnalyzer:
             except Exception as hw_err:
                 logger.debug(f"[{ticker}] high_watermark 조회 실패 (무시): {hw_err}")
 
+        # 시장 국면 데이터 (SPY, QQQ, ^VIX)
+        market_context = {}
+        try:
+            from data_fetcher.market_data import market_fetcher as _mf
+            for symbol in ["SPY", "QQQ", "^VIX"]:
+                data = _mf.fetch_realtime_price(symbol)
+                if data:
+                    market_context[symbol] = {
+                        "price": data["price"],
+                        "change_pct": data["change_pct"],
+                    }
+        except Exception as e:
+            logger.debug(f"[{ticker}] 시장 국면 데이터 조회 실패 (무시): {e}")
+
         return {
             "stock": {
                 "ticker": stock.ticker,
@@ -255,6 +269,7 @@ class SellAnalyzer:
             "atr": atr_value,
             "high_watermark": high_watermark,
             "drawdown_from_high_pct": drawdown_from_high_pct,
+            "market_context": market_context,
         }
 
     def _build_sell_prompt(self, context: dict) -> str:
@@ -331,6 +346,24 @@ class SellAnalyzer:
             prompt_parts.append(json.dumps(prices[-10:], indent=2))
             prompt_parts.append("")
 
+        # 시장 국면
+        market_ctx = context.get("market_context", {})
+        if market_ctx:
+            market_lines = ["## Market Context:"]
+            spy = market_ctx.get("SPY")
+            qqq = market_ctx.get("QQQ")
+            vix = market_ctx.get("^VIX")
+            if spy:
+                trend = "상승" if spy["change_pct"] > 0 else "하락"
+                market_lines.append(f"- SPY: ${spy['price']:.2f} ({spy['change_pct']:+.2f}%) — {trend}")
+            if qqq:
+                trend = "상승" if qqq["change_pct"] > 0 else "하락"
+                market_lines.append(f"- QQQ: ${qqq['price']:.2f} ({qqq['change_pct']:+.2f}%) — {trend}")
+            if vix:
+                vix_level = "HIGH(공포)" if vix["price"] > 30 else ("ELEVATED(경계)" if vix["price"] > 20 else "LOW(안정)")
+                market_lines.append(f"- VIX: {vix['price']:.2f} ({vix_level})")
+            prompt_parts.extend(market_lines + [""])
+
         # 뉴스
         if news:
             prompt_parts.append("## Recent News:")
@@ -355,13 +388,13 @@ class SellAnalyzer:
         # ATR 기반 동적 손절가 제안 [J]
         atr = context.get("atr")
         if atr and current_price:
-            atr_stop = current_price - (2 * atr)
+            atr_stop = current_price - (3 * atr)
             atr_pct = (atr_stop - current_price) / current_price * 100
             prompt_parts.extend([
                 "",
                 "## Volatility-Based Stop Loss (ATR):",
                 f"- ATR(14): ${atr:.2f}",
-                f"- ATR 기반 손절가 (2×ATR): ${atr_stop:.2f} (현재가 대비 {atr_pct:.1f}%)",
+                f"- ATR 기반 손절가 (3×ATR, Chandelier Exit): ${atr_stop:.2f} (현재가 대비 {atr_pct:.1f}%)",
                 "",
             ])
 

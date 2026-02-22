@@ -15,6 +15,8 @@ from database.models import AIRecommendation, MarketNews, PriceHistory, Stock, T
 SYSTEM_PROMPT = """You are an expert US stock market analyst specializing in technical and fundamental analysis.
 Analyze the provided stock data and generate a buy recommendation.
 
+IMPORTANT: Only base your analysis on the provided data. Do not assume or fabricate any information not given. If data is insufficient, reflect that in lower confidence.
+
 CRITICAL: Respond ONLY with valid JSON matching this exact schema:
 {
     "action": "STRONG_BUY" | "BUY" | "HOLD",
@@ -24,7 +26,7 @@ CRITICAL: Respond ONLY with valid JSON matching this exact schema:
     "technical_score": <float 0.0-10.0>,
     "fundamental_score": <float 0.0-10.0>,
     "sentiment_score": <float 0.0-10.0>,
-    "reasoning": "<Korean string, max 500 chars>",
+    "reasoning": "<string, max 500 chars, in English>",
     "key_factors": ["<factor1>", "<factor2>", ...],
     "risks": ["<risk1>", "<risk2>", ...]
 }
@@ -33,7 +35,7 @@ Guidelines:
 - STRONG_BUY: confidence >= 0.80, clear bullish signals across multiple indicators
 - BUY: confidence >= 0.65, moderate bullish signals
 - HOLD: insufficient bullish evidence or mixed signals
-- reasoning must be in Korean
+- reasoning must be in English for consistency
 - target_price and stop_loss should be realistic based on current price and volatility"""
 
 
@@ -171,6 +173,29 @@ class AIAnalyzer:
             "exchange": stock.exchange,
         }
 
+        # 기본 재무 데이터 (fundamental_score 할루시네이션 방지)
+        fundamentals = {}
+        try:
+            import yfinance as yf
+            yt = yf.Ticker(ticker)
+            info = yt.info
+            fundamentals = {
+                "pe_ratio": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "pb_ratio": info.get("priceToBook"),
+                "ps_ratio": info.get("priceToSalesTrailing12Months"),
+                "dividend_yield": info.get("dividendYield"),
+                "eps_trailing": info.get("trailingEps"),
+                "eps_forward": info.get("forwardEps"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "profit_margin": info.get("profitMargins"),
+                "debt_to_equity": info.get("debtToEquity"),
+                "roe": info.get("returnOnEquity"),
+                "free_cash_flow": info.get("freeCashflow"),
+            }
+        except Exception as e:
+            logger.debug(f"[{ticker}] 재무 데이터 조회 실패 (무시): {e}")
+
         # 백테스팅 과거 성과 (lazy import, 순환 임포트 방지) [C]
         past_performance = {}
         try:
@@ -233,6 +258,7 @@ class AIAnalyzer:
             "indicators": indicators,
             "news": news,
             "current_price": prices[-1]["close"] if prices else None,
+            "fundamentals": fundamentals,
             "past_performance": past_performance,
             "market_context": market_context,
             "earnings_warning": earnings_warning,
@@ -261,6 +287,35 @@ class AIAnalyzer:
             json.dumps(ind, indent=2),
             "",
         ]
+
+        # 재무 데이터 (Fundamental Data)
+        fundamentals = context.get("fundamentals", {})
+        if fundamentals:
+            fund_lines = ["## Fundamental Data:"]
+            fund_labels = {
+                "pe_ratio": "P/E (trailing)",
+                "forward_pe": "P/E (forward)",
+                "pb_ratio": "P/B",
+                "ps_ratio": "P/S",
+                "dividend_yield": "Dividend Yield",
+                "eps_trailing": "EPS (trailing)",
+                "eps_forward": "EPS (forward)",
+                "revenue_growth": "Revenue Growth",
+                "profit_margin": "Profit Margin",
+                "debt_to_equity": "Debt/Equity",
+                "roe": "ROE",
+                "free_cash_flow": "Free Cash Flow",
+            }
+            for key, label in fund_labels.items():
+                val = fundamentals.get(key)
+                if val is not None:
+                    if key in ("dividend_yield", "revenue_growth", "profit_margin", "roe"):
+                        fund_lines.append(f"- {label}: {val:.2%}" if isinstance(val, (int, float)) else f"- {label}: {val}")
+                    elif key == "free_cash_flow":
+                        fund_lines.append(f"- {label}: ${val:,.0f}" if isinstance(val, (int, float)) else f"- {label}: {val}")
+                    else:
+                        fund_lines.append(f"- {label}: {val}")
+            prompt_parts.extend(fund_lines + [""])
 
         if ind:
             # 기술적 신호 요약
@@ -397,17 +452,23 @@ class AIAnalyzer:
             tp = data.get("target_price")
             sl = data.get("stop_loss")
             if tp is not None:
-                if not (current_price * 0.5 <= tp <= current_price * 2.0):
+                if not (current_price * 0.95 <= tp <= current_price * 1.30):
                     logger.warning(
-                        f"target_price ${tp} 범위 초과 (현재가 ${current_price}의 0.5~2.0배) → None"
+                        f"target_price ${tp} 범위 초과 (현재가 ${current_price}의 0.95~1.30배) → None"
                     )
                     data["target_price"] = None
             if sl is not None:
-                if not (current_price * 0.5 <= sl <= current_price * 1.0):
+                if not (current_price * 0.85 <= sl <= current_price * 0.99):
                     logger.warning(
-                        f"stop_loss ${sl} 범위 초과 (현재가 ${current_price}의 0.5~1.0배) → None"
+                        f"stop_loss ${sl} 범위 초과 (현재가 ${current_price}의 0.85~0.99배) → None"
                     )
                     data["stop_loss"] = None
+
+        # score 필드 범위 검증 (0.0~10.0 클램핑)
+        for score_field in ["technical_score", "fundamental_score", "sentiment_score"]:
+            val = data.get(score_field)
+            if val is not None:
+                data[score_field] = max(0.0, min(10.0, float(val)))
 
         return data
 

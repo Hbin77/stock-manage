@@ -22,7 +22,7 @@ class Settings:
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     AI_MAX_TOKENS: int = int(os.getenv("AI_MAX_TOKENS", "2048"))
-    AI_TEMPERATURE: float = float(os.getenv("AI_TEMPERATURE", "0.3"))
+    AI_TEMPERATURE: float = float(os.getenv("AI_TEMPERATURE", "0.15"))
     BUY_CONFIDENCE_THRESHOLD: float = float(os.getenv("BUY_CONFIDENCE_THRESHOLD", "0.65"))
     SELL_CONFIDENCE_THRESHOLD: float = float(os.getenv("SELL_CONFIDENCE_THRESHOLD", "0.60"))
 

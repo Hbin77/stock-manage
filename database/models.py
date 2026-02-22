@@ -156,6 +156,12 @@ class TechnicalIndicator(Base):
     # 거래량 이동평균
     volume_ma_20: Mapped[float | None] = mapped_column(Float)
 
+    # ADX (평균 방향성 지수)
+    adx_14: Mapped[float | None] = mapped_column(Float)
+
+    # ATR (평균 진정 범위)
+    atr_14: Mapped[float | None] = mapped_column(Float)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     stock: Mapped["Stock"] = relationship(back_populates="indicators")

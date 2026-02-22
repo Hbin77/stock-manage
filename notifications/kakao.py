@@ -11,6 +11,8 @@
   5. curl 또는 requests로 access_token + refresh_token 교환
   6. .env에 KAKAO_ACCESS_TOKEN, KAKAO_REFRESH_TOKEN 저장
 """
+import json
+
 import requests
 from loguru import logger
 
@@ -79,7 +81,7 @@ class KakaoNotifier:
             resp = requests.post(
                 KAKAO_SEND_URL,
                 headers=self._get_headers(),
-                data={"template_object": str(template).replace("'", '"')},
+                data={"template_object": json.dumps(template)},
                 timeout=10,
             )
 

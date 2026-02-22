@@ -113,6 +113,14 @@ class TechnicalAnalyzer:
             bb_middle = bb.bollinger_mavg()
             bb_lower = bb.bollinger_lband()
 
+            # ── ADX ─────────────────────────
+            adx_indicator = ta.trend.ADXIndicator(high=high, low=low, close=close, window=14)
+            adx = adx_indicator.adx()
+
+            # ── ATR ─────────────────────────
+            atr_indicator = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14)
+            atr = atr_indicator.average_true_range()
+
             # ── 이동평균선 ───────────────────
             ma_20 = close.rolling(window=20).mean()
             ma_50 = close.rolling(window=50).mean()
@@ -147,6 +155,8 @@ class TechnicalAnalyzer:
                     ma_50=_val(ma_50, date_idx),
                     ma_200=_val(ma_200, date_idx),
                     volume_ma_20=_val(vol_ma_20, date_idx),
+                    adx_14=_val(adx, date_idx),
+                    atr_14=_val(atr, date_idx),
                 )
 
                 if existing:
@@ -201,6 +211,8 @@ class TechnicalAnalyzer:
                 "ma_50": ind.ma_50,
                 "ma_200": ind.ma_200,
                 "volume_ma_20": ind.volume_ma_20,
+                "adx_14": ind.adx_14,
+                "atr_14": ind.atr_14,
             }
 
 

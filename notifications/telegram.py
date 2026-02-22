@@ -5,6 +5,8 @@
 설정:
   .env 파일에 TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID 추가
 """
+import time
+
 import requests
 from loguru import logger
 
@@ -19,31 +21,42 @@ class TelegramNotifier:
     def _is_configured(self) -> bool:
         return bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID)
 
-    def _send_message(self, text: str) -> bool:
-        """텔레그램 메시지를 전송합니다. Markdown 포맷."""
+    def _send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
+        """텔레그램 메시지를 전송합니다. 429/네트워크 오류 시 최대 3회 재시도."""
         if not self._is_configured():
             logger.debug("[텔레그램] TELEGRAM_BOT_TOKEN 또는 CHAT_ID 미설정, 스킵")
             return False
 
-        try:
-            resp = requests.post(
-                TELEGRAM_API_URL.format(token=settings.TELEGRAM_BOT_TOKEN),
-                json={
-                    "chat_id": settings.TELEGRAM_CHAT_ID,
-                    "text": text,
-                    "parse_mode": "Markdown",
-                },
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json().get("ok"):
-                return True
+        for attempt in range(3):
+            try:
+                resp = requests.post(
+                    TELEGRAM_API_URL.format(token=settings.TELEGRAM_BOT_TOKEN),
+                    json={
+                        "chat_id": settings.TELEGRAM_CHAT_ID,
+                        "text": text,
+                        "parse_mode": parse_mode,
+                    },
+                    timeout=10,
+                )
+                if resp.status_code == 200 and resp.json().get("ok"):
+                    return True
+                elif resp.status_code == 429:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                    logger.warning(f"[텔레그램] Rate limit, {retry_after}초 후 재시도")
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    logger.error(f"[텔레그램] 전송 실패: {resp.status_code} {resp.text[:200]}")
+                    return False
 
-            logger.error(f"[텔레그램] HTTP {resp.status_code}: {resp.text[:200]}")
-            return False
-
-        except Exception as e:
-            logger.error(f"[텔레그램] 전송 중 오류: {e}")
-            return False
+            except requests.exceptions.RequestException as e:
+                if attempt < 2:
+                    logger.warning(f"[텔레그램] 네트워크 오류 (시도 {attempt+1}/3): {e}")
+                    time.sleep(2)
+                else:
+                    logger.error(f"[텔레그램] 전송 최종 실패: {e}")
+                    return False
+        return False
 
     # -- 공개 메서드 (카카오와 동일 인터페이스) --
 

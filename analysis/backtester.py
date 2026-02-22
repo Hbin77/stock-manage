@@ -98,7 +98,7 @@ class Backtester:
                     logger.warning(f"[백테스팅] 비정상 추천가 스킵: rec_id={rec.id} price={price_at_rec}")
                     continue
 
-                # 가장 빠른 윈도우부터 시도 (각 윈도우 독립 체크)
+                # 모든 윈도우를 순회하며 가장 긴 기간의 수익률을 사용
                 outcome_close = None
                 for days in sorted(windows):
                     target_date = rec_date + timedelta(days=days)
@@ -119,7 +119,6 @@ class Backtester:
                     )
                     if row:
                         outcome_close = row.close
-                        break
 
                 if outcome_close is None:
                     continue
