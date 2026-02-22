@@ -30,7 +30,7 @@ from database.models import PriceHistory, Stock, TechnicalIndicator
 class TechnicalAnalyzer:
     """기술적 지표 계산 및 저장"""
 
-    def _load_price_df(self, ticker: str, db, lookback_days: int = 250) -> pd.DataFrame:
+    def _load_price_df(self, ticker: str, db, lookback_days: int = 350) -> pd.DataFrame:
         """DB에서 가격 이력을 불러와 DataFrame으로 반환합니다."""
         stock = db.query(Stock).filter(Stock.ticker == ticker).first()
         if stock is None:

@@ -31,6 +31,11 @@ from data_fetcher.market_data import market_fetcher
 
 def job_realtime_price_update():
     """현재가 갱신 작업 (N분마다 실행)"""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5:  # 토요일=5, 일요일=6
+        logger.debug("[스케줄] 주말, 실시간 가격 갱신 스킵")
+        return {}
     logger.debug(f"[스케줄] 실시간 가격 갱신 시작 ({datetime.now().strftime('%H:%M:%S')})")
     prices = market_fetcher.fetch_all_realtime_prices()
     logger.info(f"[스케줄] 실시간 가격 갱신 완료: {len(prices)}개 종목")
@@ -125,7 +130,8 @@ def job_update_backtesting():
 
 def job_price_alert_check():
     """가격 알림 체크 (장중 5분마다 09:30~16:00)"""
-    now = datetime.now()
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
     # 09:30 이전 실행 시 스킵
     if now.hour < 9 or (now.hour == 9 and now.minute < 30):
         logger.debug("[스케줄] 장 개장 전, 가격 알림 체크 스킵")

@@ -247,6 +247,8 @@ class AIAnalyzer:
         current_price = context.get("current_price")
 
         prompt_parts = [
+            f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M')} ET",
+            "",
             f"## Stock: {stock.get('ticker')} - {stock.get('name')}",
             f"Sector: {stock.get('sector')} | Industry: {stock.get('industry')}",
             f"Market Cap: ${stock.get('market_cap', 0):,.0f}" if stock.get("market_cap") else "Market Cap: N/A",
@@ -354,7 +356,7 @@ class AIAnalyzer:
 
         return "\n".join(prompt_parts)
 
-    def _parse_response(self, text: str) -> dict:
+    def _parse_response(self, text: str, current_price: float | None = None) -> dict:
         """AI 응답을 파싱하고 필수 필드를 검증합니다."""
         try:
             data = json.loads(text)
@@ -390,6 +392,23 @@ class AIAnalyzer:
         data.setdefault("key_factors", [])
         data.setdefault("risks", [])
 
+        # target_price / stop_loss 합리성 검증
+        if current_price is not None and current_price > 0:
+            tp = data.get("target_price")
+            sl = data.get("stop_loss")
+            if tp is not None:
+                if not (current_price * 0.5 <= tp <= current_price * 2.0):
+                    logger.warning(
+                        f"target_price ${tp} 범위 초과 (현재가 ${current_price}의 0.5~2.0배) → None"
+                    )
+                    data["target_price"] = None
+            if sl is not None:
+                if not (current_price * 0.5 <= sl <= current_price * 1.0):
+                    logger.warning(
+                        f"stop_loss ${sl} 범위 초과 (현재가 ${current_price}의 0.5~1.0배) → None"
+                    )
+                    data["stop_loss"] = None
+
         return data
 
     def analyze_ticker(self, ticker: str) -> AIRecommendation | None:
@@ -421,8 +440,25 @@ class AIAnalyzer:
             prompt = self._build_prompt(context)
 
             try:
-                response = model.generate_content(prompt)
-                parsed = self._parse_response(response.text)
+                import time
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        response = model.generate_content(prompt)
+                        break
+                    except Exception as api_err:
+                        last_err = api_err
+                        if attempt < 2:
+                            logger.warning(
+                                f"[{ticker}] API 호출 실패 (시도 {attempt + 1}/3), 5초 후 재시도: {api_err}"
+                            )
+                            time.sleep(5)
+                        else:
+                            raise last_err
+                parsed = self._parse_response(
+                    response.text,
+                    current_price=context.get("current_price"),
+                )
             except Exception as e:
                 logger.error(f"[{ticker}] AI API 호출 실패: {e}")
                 return None
@@ -435,6 +471,37 @@ class AIAnalyzer:
                     f"→ HOLD 다운그레이드 (원래: {parsed['action']})"
                 )
                 parsed["action"] = "HOLD"
+
+            # VIX 하드 필터: 높은 변동성 시기에 매수 신호 다운그레이드
+            vix_data = context.get("market_context", {}).get("^VIX")
+            if vix_data:
+                vix_level = vix_data.get("price", 0)
+                if vix_level > 40 and parsed["action"] in ("BUY", "STRONG_BUY"):
+                    logger.info(
+                        f"[{ticker}] VIX={vix_level:.1f} > 40 → HOLD 다운그레이드 (원래: {parsed['action']})"
+                    )
+                    parsed["action"] = "HOLD"
+                elif vix_level > 30 and parsed["action"] == "STRONG_BUY":
+                    logger.info(
+                        f"[{ticker}] VIX={vix_level:.1f} > 30 → BUY 다운그레이드 (원래: STRONG_BUY)"
+                    )
+                    parsed["action"] = "BUY"
+
+            # 리스크 매니저 연동: BUY/STRONG_BUY인 경우 리스크 체크
+            if parsed["action"] in ("BUY", "STRONG_BUY"):
+                try:
+                    from analysis.risk_manager import risk_manager
+                    sector = stock.sector if stock else None
+                    risk_check = risk_manager.check_can_buy(ticker, sector)
+                    if not risk_check["allowed"]:
+                        logger.info(
+                            f"[{ticker}] 리스크 체크 실패: {risk_check['reason']} "
+                            f"→ HOLD 다운그레이드 (원래: {parsed['action']})"
+                        )
+                        parsed["reasoning"] += f" [리스크 관리: {risk_check['reason']}]"
+                        parsed["action"] = "HOLD"
+                except Exception as risk_err:
+                    logger.debug(f"[{ticker}] 리스크 체크 실패 (무시): {risk_err}")
 
             # DB 저장
             rec = AIRecommendation(
@@ -516,14 +583,18 @@ class AIAnalyzer:
 
                 score = 0.0
 
-                # RSI 신호
+                # RSI 신호 (떨어지는 칼 방지: RSI<35이면서 MA200 아래이면 점수 추가 안 함)
+                below_ma200 = (current_price and ind.ma_200 and current_price < ind.ma_200)
                 if ind.rsi_14 is not None:
                     if ind.rsi_14 < 35:
-                        score += 3.0
+                        if not below_ma200:
+                            score += 3.0
+                        else:
+                            logger.debug(f"[{ticker}] RSI={ind.rsi_14:.1f} < 35이지만 MA200 아래 → 점수 미부여 (떨어지는 칼 방지)")
                     elif ind.rsi_14 < 45:
                         score += 1.0
 
-                # MACD 방향 전환 스코어링 [E]
+                # MACD 방향 전환 스코어링 [E] (골든크로스 시 거래량 조건 추가)
                 if ind.macd_hist is not None and ind.macd_hist > 0:
                     prev_ind_row = (
                         db.query(TechnicalIndicator)
@@ -535,7 +606,12 @@ class AIAnalyzer:
                         .first()
                     )
                     if prev_ind_row and prev_ind_row.macd_hist is not None and prev_ind_row.macd_hist <= 0:
-                        score += 3.0  # 골든크로스 발생 (전환점)
+                        # 골든크로스 발생: 거래량 >= VMA20이면 +3, 아니면 +1
+                        latest_volume = latest_price_row.volume if latest_price_row else None
+                        if latest_volume and ind.volume_ma_20 and latest_volume >= ind.volume_ma_20:
+                            score += 3.0  # 골든크로스 + 거래량 수반
+                        else:
+                            score += 1.0  # 골든크로스이지만 거래량 부족
                     else:
                         score += 2.0  # 양수 유지 (상승 모멘텀)
 
@@ -550,7 +626,7 @@ class AIAnalyzer:
                     if current_price > ind.ma_200:
                         score += 2.0   # 장기 상승 추세
                     else:
-                        score -= 1.0   # 장기 하락 추세 페널티
+                        score -= 3.0   # 장기 하락 추세 페널티 (강화)
 
                 # 볼린저밴드 하단 근처 — 거래량 조건부 스코어링 [H]
                 if (current_price and ind.bb_upper and ind.bb_lower and

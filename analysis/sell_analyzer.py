@@ -203,6 +203,35 @@ class SellAnalyzer:
             except (ValueError, TypeError):
                 holding_days = 0
 
+        # ── 보유기간 중 최고가 (high_watermark) 조회 ──
+        high_watermark = None
+        drawdown_from_high_pct = None
+        current_price_val = holding_info.get("current_price", 0)
+
+        if holding_info.get("first_bought_at"):
+            try:
+                from sqlalchemy import func, and_
+                bought_at = datetime.strptime(holding_info["first_bought_at"], "%Y-%m-%d")
+                hw_row = (
+                    db.query(func.max(PriceHistory.high))
+                    .filter(
+                        and_(
+                            PriceHistory.stock_id == stock.id,
+                            PriceHistory.interval == "1d",
+                            PriceHistory.timestamp >= bought_at,
+                        )
+                    )
+                    .scalar()
+                )
+                if hw_row and hw_row > 0:
+                    high_watermark = round(hw_row, 2)
+                    if current_price_val and current_price_val > 0:
+                        drawdown_from_high_pct = round(
+                            (current_price_val - hw_row) / hw_row * 100, 2
+                        )
+            except Exception as hw_err:
+                logger.debug(f"[{ticker}] high_watermark 조회 실패 (무시): {hw_err}")
+
         return {
             "stock": {
                 "ticker": stock.ticker,
@@ -224,6 +253,8 @@ class SellAnalyzer:
             "news": news,
             "ai_stop_loss": ai_stop_loss,
             "atr": atr_value,
+            "high_watermark": high_watermark,
+            "drawdown_from_high_pct": drawdown_from_high_pct,
         }
 
     def _build_sell_prompt(self, context: dict) -> str:
@@ -334,6 +365,23 @@ class SellAnalyzer:
                 "",
             ])
 
+        # Trailing Stop Analysis
+        high_watermark = context.get("high_watermark")
+        drawdown_from_high_pct = context.get("drawdown_from_high_pct")
+        if high_watermark is not None:
+            prompt_parts.extend([
+                "",
+                "## Trailing Stop Analysis:",
+                f"- 보유기간 중 최고가 (High Watermark): ${high_watermark:.2f}",
+                f"- 현재가 대비 최고가 하락률: {drawdown_from_high_pct:+.2f}%",
+            ])
+            if drawdown_from_high_pct is not None and drawdown_from_high_pct <= -10:
+                prompt_parts.append(
+                    f"🔴 WARNING: 최고가 대비 {abs(drawdown_from_high_pct):.1f}% 하락 — "
+                    f"트레일링 스톱(-10%) 기준 초과. 즉각 매도 검토 필요!"
+                )
+            prompt_parts.append("")
+
         # PnL 기반 특별 경고 (AI stop_loss 보조 기준) [D, M]
         if pnl_pct <= -10:
             if not ai_stop_loss:
@@ -359,7 +407,7 @@ class SellAnalyzer:
 
         return "\n".join(prompt_parts)
 
-    def _parse_response(self, text: str) -> dict:
+    def _parse_response(self, text: str, current_price: float | None = None) -> dict:
         """AI 응답을 파싱하고 필수 필드를 검증합니다."""
         try:
             data = json.loads(text)
@@ -390,6 +438,16 @@ class SellAnalyzer:
         data.setdefault("suggested_sell_price", None)
         data.setdefault("exit_strategy", "")
         data.setdefault("risk_factors", [])
+
+        # suggested_sell_price 합리성 검증
+        if current_price is not None and current_price > 0:
+            sp = data.get("suggested_sell_price")
+            if sp is not None:
+                if not (current_price * 0.5 <= sp <= current_price * 2.0):
+                    logger.warning(
+                        f"suggested_sell_price ${sp} 범위 초과 (현재가 ${current_price}의 0.5~2.0배) → None"
+                    )
+                    data["suggested_sell_price"] = None
 
         return data
 
@@ -426,10 +484,22 @@ class SellAnalyzer:
 
             try:
                 response = model.generate_content(prompt)
-                parsed = self._parse_response(response.text)
+                parsed = self._parse_response(
+                    response.text,
+                    current_price=holding_info.get("current_price"),
+                )
             except Exception as e:
                 logger.error(f"[{ticker}] 매도 AI API 호출 실패: {e}")
                 return None
+
+            # 신뢰도 임계값 미달 시 HOLD로 다운그레이드
+            threshold = settings.SELL_CONFIDENCE_THRESHOLD
+            if parsed["signal"] in ("SELL", "STRONG_SELL") and parsed["confidence"] < threshold:
+                logger.info(
+                    f"[{ticker}] 매도 신뢰도 {parsed['confidence']:.0%} < 임계값 {threshold:.0%} "
+                    f"→ HOLD 다운그레이드 (원래: {parsed['signal']})"
+                )
+                parsed["signal"] = "HOLD"
 
             # DB 저장
             sig = SellSignal(

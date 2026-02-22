@@ -31,7 +31,7 @@ from database.models import (
 __all__ = ["AlertManager", "VALID_ALERT_TYPES", "alert_manager"]
 
 # ── 모듈 상수 ──────────────────────────────────────────────────────────────────
-VALID_ALERT_TYPES: frozenset = frozenset({"STOP_LOSS", "TARGET_PRICE", "VOLUME_SURGE"})
+VALID_ALERT_TYPES: frozenset = frozenset({"STOP_LOSS", "TARGET_PRICE", "VOLUME_SURGE", "TRAILING_STOP"})
 
 
 # ── 내부 헬퍼 데이터클래스 ────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ class AlertManager:
     """가격 알림 체크 및 발송 매니저"""
 
     COOLDOWN_MINUTES = 60
+    TRAILING_STOP_PCT = 0.10  # 최고가 대비 -10% 하락 시 트레일링 스톱 발동
 
     # ── 내부 유틸리티 ──────────────────────────────────────────────────────────
 
@@ -215,6 +216,45 @@ class AlertManager:
                     )
                     if result is not None:
                         triggered.append(result)
+
+                # ── 트레일링 스톱 체크 (DB 변경 없이 코드 내 처리) ──
+                # buy_date 이후 PriceHistory의 max(high)를 high_watermark로 사용
+                buy_date = getattr(holding, "first_bought_at", None)
+                if buy_date is None:
+                    buy_date = getattr(holding, "created_at", None)
+
+                if buy_date is not None and current_price is not None:
+                    from sqlalchemy import func
+                    high_watermark_row = (
+                        db.query(func.max(PriceHistory.high))
+                        .filter(
+                            and_(
+                                PriceHistory.stock_id == stock.id,
+                                PriceHistory.interval == "1d",
+                                PriceHistory.timestamp >= buy_date,
+                            )
+                        )
+                        .scalar()
+                    )
+
+                    if high_watermark_row and high_watermark_row > 0:
+                        drawdown = (current_price - high_watermark_row) / high_watermark_row
+                        if drawdown <= -self.TRAILING_STOP_PCT:
+                            result = self._fire_alert(
+                                db, stock, "TRAILING_STOP",
+                                current_price, high_watermark_row,
+                                extra={
+                                    "high_watermark": round(high_watermark_row, 2),
+                                    "drawdown_pct": round(drawdown * 100, 2),
+                                },
+                            )
+                            if result is not None:
+                                result["message"] = (
+                                    f"[TRAILING_STOP] {stock.ticker} ({stock.name}) "
+                                    f"현재가 ${current_price:.2f} / 최고가 ${high_watermark_row:.2f} "
+                                    f"(하락률 {drawdown * 100:.1f}%)"
+                                )
+                                triggered.append(result)
 
         return triggered
 

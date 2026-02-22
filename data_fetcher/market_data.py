@@ -190,37 +190,48 @@ class MarketDataFetcher:
             if stock is None:
                 return 0
 
-            saved = 0
+            # Bulk upsert: N+1 쿼리 문제를 해결하기 위해 sqlite INSERT ... ON CONFLICT 사용
+            rows_to_save = []
             for ts, row in df.iterrows():
-                # 이미 존재하는 레코드는 건너뜀 (UNIQUE 제약 활용)
-                existing = (
-                    db.query(PriceHistory)
-                    .filter(
-                        PriceHistory.stock_id == stock.id,
-                        PriceHistory.timestamp == ts,
-                        PriceHistory.interval == interval,
-                    )
-                    .first()
-                )
-                if existing:
-                    continue
+                rows_to_save.append({
+                    "stock_id": stock.id,
+                    "timestamp": ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                    "interval": interval,
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": int(row["Volume"]),
+                    "adj_close": float(row.get("Close", row["Close"])),
+                })
 
-                ph = PriceHistory(
-                    stock_id=stock.id,
-                    timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
-                    interval=interval,
-                    open=float(row["Open"]),
-                    high=float(row["High"]),
-                    low=float(row["Low"]),
-                    close=float(row["Close"]),
-                    volume=int(row["Volume"]),
-                    adj_close=float(row.get("Close", row["Close"])),
+            for row_data in rows_to_save:
+                stmt = sqlite_insert(PriceHistory).values(**row_data)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['stock_id', 'timestamp', 'interval'],
+                    set_={
+                        'open': stmt.excluded.open,
+                        'high': stmt.excluded.high,
+                        'low': stmt.excluded.low,
+                        'close': stmt.excluded.close,
+                        'adj_close': stmt.excluded.adj_close,
+                        'volume': stmt.excluded.volume,
+                    }
                 )
-                db.add(ph)
-                saved += 1
+                db.execute(stmt)
+            db.commit()
 
-        logger.info(f"[{ticker}] {saved}개 가격 데이터 저장 완료")
-        return saved
+        logger.info(f"[{ticker}] {len(rows_to_save)}개 가격 데이터 저장 완료")
+        return len(rows_to_save)
+
+    @staticmethod
+    def _get_realtime_volume(fi) -> int:
+        """당일 실제 거래량 반환. last_volume 우선, fallback으로 three_month_average_volume."""
+        try:
+            volume = fi.last_volume or fi.three_month_average_volume or 0
+        except Exception:
+            volume = 0
+        return int(volume)
 
     def fetch_realtime_price(self, ticker: str) -> Optional[dict]:
         """
@@ -263,7 +274,7 @@ class MarketDataFetcher:
                 "price": float(price),
                 "change": float(change),
                 "change_pct": float(change_pct),
-                "volume": getattr(fi, "three_month_average_volume", 0) or 0,
+                "volume": self._get_realtime_volume(fi),
                 "market_cap": getattr(fi, "market_cap", None),
                 "timestamp": datetime.now(timezone.utc).replace(tzinfo=None),
             }
@@ -358,6 +369,7 @@ class MarketDataFetcher:
                 )
 
                 # VADER 감성 점수 계산 (title + summary 합산)
+                # NOTE: VADER는 금융 도메인 특화가 아님. AI 분석 시 뉴스 제목 원문을 직접 참조하여 보완됨
                 sentiment_score = None
                 if _sia:
                     text = item.get("title", "")

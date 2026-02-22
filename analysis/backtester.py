@@ -35,21 +35,24 @@ class Backtester:
     """AI 추천 결과 사후 검증 엔진"""
 
     LOOKBACK_WINDOWS: LookbackWindows = [5, 10, 30]
+    TRADING_COST: float = 0.003  # 0.3% = 수수료 0.1% + 슬리피지 0.2%
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _group_stats(returns: list[float]) -> GroupStats:
+    def _group_stats(returns: list[float], trading_cost_pct: float = 0.3) -> GroupStats:
         """
         수익률 목록으로 승률과 평균 수익률을 계산합니다.
 
         Args:
             returns: 수익률 값 목록 (비어있으면 안 됨)
+            trading_cost_pct: 수수료 이상 벌어야 승리로 인정 (기본 0.3%)
 
         Returns:
             {"win_rate": float, "avg_return": float}
         """
-        wins = [x for x in returns if x > 0]
+        # 수수료 이상 벌어야 실질 승리로 인정
+        wins = [x for x in returns if x > trading_cost_pct]
         return {
             "win_rate": round(len(wins) / len(returns) * 100, 2),
             "avg_return": round(sum(returns) / len(returns), 4),
@@ -121,7 +124,7 @@ class Backtester:
                 if outcome_close is None:
                     continue
 
-                outcome_return = (outcome_close - price_at_rec) / price_at_rec * 100
+                outcome_return = ((outcome_close - price_at_rec) / price_at_rec - self.TRADING_COST) * 100
                 rec.outcome_price = outcome_close
                 rec.outcome_return = round(outcome_return, 4)
                 updated += 1
@@ -180,8 +183,10 @@ class Backtester:
                 }
 
             returns = [r.outcome_return for r, _ in with_outcomes]
-            stats = self._group_stats(returns)
+            stats = self._group_stats(returns, trading_cost_pct=self.TRADING_COST * 100)
             med_return = median(returns)
+            # TODO: SPY 벤치마크 대비 초과수익(alpha) 계산 추가
+            # - 동일 기간 SPY 수익률 조회 후 alpha = avg_return - spy_return 산출
 
             # Sharpe proxy: avg / std (단순 근사)
             sharpe_proxy = None
