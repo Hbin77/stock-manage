@@ -1,0 +1,52 @@
+services:
+  # ─────────────────────────────────────────────
+  # 스케줄러: 데이터 수집 + AI 분석 (최초 실행 시 DB 초기화 포함)
+  # ─────────────────────────────────────────────
+  scheduler:
+    build: .
+    entrypoint: ["/app/docker-entrypoint.sh"]
+    command: python main.py run
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/stock_manage.db
+      LOG_FILE: /app/logs/stock_manage.log
+    volumes:
+      - stock_data:/app/data
+      - stock_logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      # DB 파일이 생성되면 healthy
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/stock_manage.db') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s  # 초기 데이터 로딩 시간 확보
+
+  # ─────────────────────────────────────────────
+  # 대시보드: Streamlit UI (스케줄러 DB 초기화 완료 후 기동)
+  # ─────────────────────────────────────────────
+  dashboard:
+    build: .
+    command: >
+      streamlit run dashboard/app.py
+      --server.port=8085
+      --server.address=0.0.0.0
+      --server.headless=true
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/stock_manage.db
+      LOG_FILE: /app/logs/stock_manage.log
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    volumes:
+      - stock_data:/app/data
+      - stock_logs:/app/logs
+    ports:
+      - "8085:8085"
+    restart: unless-stopped
+    depends_on:
+      scheduler:
+        condition: service_healthy  # scheduler DB 초기화 완료 후 기동
+
+volumes:
+  stock_data:   # SQLite DB 영구 저장
+  stock_logs:   # 로그 파일 영구 저장
