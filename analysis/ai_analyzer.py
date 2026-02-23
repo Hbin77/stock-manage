@@ -673,7 +673,8 @@ class AIAnalyzer:
         from database.models import TechnicalIndicator, PriceHistory
         from datetime import timedelta
 
-        watchlist = settings.WATCHLIST_TICKERS
+        from config.tickers import ALL_TICKERS
+        watchlist = ALL_TICKERS
         scores: dict[str, float] = {}
 
         cutoff_date = datetime.now() - timedelta(days=3)  # 최근 3일 이내 지표만 유효
@@ -804,7 +805,10 @@ class AIAnalyzer:
             {ticker: action} 딕셔너리
         """
         results = {}
-        all_tickers = settings.WATCHLIST_TICKERS
+        # 매수 분석은 전체 유니버스(ALL_TICKERS)에서 후보를 찾음
+        # (보유 종목만 분석하면 새 매수 기회를 놓침)
+        from config.tickers import ALL_TICKERS
+        all_tickers = ALL_TICKERS
 
         # 50개 초과 시 우선순위 필터 적용
         if len(all_tickers) > 50:
