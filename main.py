@@ -11,7 +11,9 @@
   python main.py sell_check   - AI 매도 신호 즉시 분석
   python main.py notify_test  - 카카오톡 연결 테스트
 """
+import signal
 import sys
+import threading
 import time
 
 from loguru import logger
@@ -75,6 +77,15 @@ def cmd_init(years: int = 2):
     logger.success("초기화 완료! 이제 'python main.py run' 으로 실시간 모드를 시작하세요.")
 
 
+shutdown_event = threading.Event()
+
+
+def handle_signal(signum, frame):
+    """SIGTERM/SIGINT 시그널 핸들러 (Docker graceful shutdown 지원)"""
+    logger.info(f"종료 신호 수신 (signal {signum})")
+    shutdown_event.set()
+
+
 def cmd_run():
     """
     [run] 실시간 스케줄러 시작 (Ctrl+C로 종료)
@@ -87,13 +98,16 @@ def cmd_run():
         logger.error("DB 연결 실패. 종료합니다.")
         sys.exit(1)
 
+    # 시그널 핸들러 등록 (Docker SIGTERM 대응)
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
     # 스케줄러 시작
     data_scheduler.start()
 
-    logger.info("스케줄러 실행 중... (종료: Ctrl+C)")
+    logger.info("스케줄러 실행 중... (종료: Ctrl+C 또는 SIGTERM)")
     try:
-        while True:
-            time.sleep(60)
+        shutdown_event.wait()
     except (KeyboardInterrupt, SystemExit):
         logger.info("종료 신호 수신")
     finally:

@@ -127,17 +127,26 @@ class TechnicalAnalyzer:
             ma_200 = close.rolling(window=200).mean()
             vol_ma_20 = volume.rolling(window=20).mean()
 
+            # ── OBV (On-Balance Volume) ─────
+            obv_indicator = ta.volume.OnBalanceVolumeIndicator(close=close, volume=volume)
+            obv = obv_indicator.on_balance_volume()
+
+            # ── Stochastic RSI ──────────────
+            stoch_rsi = ta.momentum.StochRSIIndicator(close=close, window=14, smooth1=3, smooth2=3)
+            stoch_rsi_k = stoch_rsi.stochrsi_k()
+            stoch_rsi_d = stoch_rsi.stochrsi_d()
+
             # ── DB 저장 ──────────────────────
+            # Pre-load existing dates to avoid N+1 query
+            existing_dates = set(
+                row.date for row in
+                db.query(TechnicalIndicator.date)
+                .filter(TechnicalIndicator.stock_id == stock.id)
+                .all()
+            )
+
             saved = 0
             for date_idx in df.index:
-                existing = (
-                    db.query(TechnicalIndicator)
-                    .filter(
-                        TechnicalIndicator.stock_id == stock.id,
-                        TechnicalIndicator.date == date_idx,
-                    )
-                    .first()
-                )
 
                 def _val(series, idx):
                     v = series.get(idx)
@@ -157,11 +166,23 @@ class TechnicalAnalyzer:
                     volume_ma_20=_val(vol_ma_20, date_idx),
                     adx_14=_val(adx, date_idx),
                     atr_14=_val(atr, date_idx),
+                    obv=_val(obv, date_idx),
+                    stoch_rsi_k=_val(stoch_rsi_k, date_idx),
+                    stoch_rsi_d=_val(stoch_rsi_d, date_idx),
                 )
 
-                if existing:
-                    for k, v in indicator_data.items():
-                        setattr(existing, k, v)
+                if date_idx in existing_dates:
+                    existing = (
+                        db.query(TechnicalIndicator)
+                        .filter(
+                            TechnicalIndicator.stock_id == stock.id,
+                            TechnicalIndicator.date == date_idx,
+                        )
+                        .first()
+                    )
+                    if existing:
+                        for k, v in indicator_data.items():
+                            setattr(existing, k, v)
                 else:
                     ind = TechnicalIndicator(
                         stock_id=stock.id,
@@ -234,6 +255,9 @@ class TechnicalAnalyzer:
                 "volume_ma_20": ind.volume_ma_20,
                 "adx_14": ind.adx_14,
                 "atr_14": ind.atr_14,
+                "obv": ind.obv,
+                "stoch_rsi_k": ind.stoch_rsi_k,
+                "stoch_rsi_d": ind.stoch_rsi_d,
             }
 
 

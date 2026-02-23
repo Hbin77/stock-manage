@@ -20,17 +20,22 @@ class RiskManager:
         from database.models import PortfolioHolding, Stock
 
         with get_db() as db:
-            # 1. 현재 보유 종목 수 확인
-            holdings = db.query(PortfolioHolding).filter(
-                PortfolioHolding.quantity > 0
-            ).all()
+            # 1. 현재 보유 종목 수 확인 (단일 JOIN 쿼리로 Stock 일괄 로드)
+            rows = (
+                db.query(PortfolioHolding, Stock)
+                .join(Stock, PortfolioHolding.stock_id == Stock.id)
+                .filter(PortfolioHolding.quantity > 0)
+                .all()
+            )
+            holdings = [h for h, _ in rows]
+            stock_map = {h.stock_id: s for h, s in rows}
 
             if len(holdings) >= self.MAX_HOLDINGS:
                 return {"allowed": False, "reason": f"최대 보유 종목 수({self.MAX_HOLDINGS}) 초과", "max_amount_pct": 0}
 
             # 2. 이미 보유 중인 종목인지 확인
             for h in holdings:
-                stock = db.query(Stock).filter(Stock.id == h.stock_id).first()
+                stock = stock_map.get(h.stock_id)
                 if stock and stock.ticker == ticker:
                     return {"allowed": False, "reason": f"이미 보유 중인 종목", "max_amount_pct": 0}
 
@@ -38,7 +43,7 @@ class RiskManager:
             if sector:
                 sector_count = 0
                 for h in holdings:
-                    stock = db.query(Stock).filter(Stock.id == h.stock_id).first()
+                    stock = stock_map.get(h.stock_id)
                     if stock and stock.sector == sector:
                         sector_count += 1
                 # 섹터당 최대 5종목 (MAX_HOLDINGS의 1/3)
@@ -51,7 +56,7 @@ class RiskManager:
                 total_value = 0
                 sector_value = 0
                 for h in holdings:
-                    stock_h = db.query(Stock).filter(Stock.id == h.stock_id).first()
+                    stock_h = stock_map.get(h.stock_id)
                     holding_value = (h.quantity or 0) * (h.current_price or h.avg_buy_price or 0)
                     total_value += holding_value
                     if stock_h and stock_h.sector == sector:
@@ -61,6 +66,21 @@ class RiskManager:
                     sector_pct = sector_value / total_value
                     if sector_pct >= self.MAX_SECTOR_PCT:
                         return {"allowed": False, "reason": f"섹터({sector}) 금액 비중 {sector_pct:.0%} >= {self.MAX_SECTOR_PCT:.0%}", "max_amount_pct": 0}
+
+            # 5. 포트폴리오 일일 손실 한도 체크
+            total_value = sum(
+                (h.quantity or 0) * (h.current_price or h.avg_buy_price or 0)
+                for h in holdings
+            )
+            total_invested = sum((h.total_invested or 0) for h in holdings)
+            if total_invested > 0:
+                portfolio_return = (total_value - total_invested) / total_invested
+                if portfolio_return <= self.MAX_PORTFOLIO_LOSS_PCT:
+                    return {
+                        "allowed": False,
+                        "reason": f"포트폴리오 손실 {portfolio_return:.1%}이 한도 {self.MAX_PORTFOLIO_LOSS_PCT:.1%} 초과",
+                        "max_amount_pct": 0,
+                    }
 
             return {
                 "allowed": True,
@@ -76,19 +96,20 @@ class RiskManager:
         from database.models import PortfolioHolding, Stock
 
         with get_db() as db:
-            holdings = db.query(PortfolioHolding).filter(
-                PortfolioHolding.quantity > 0
-            ).all()
+            rows = (
+                db.query(PortfolioHolding, Stock)
+                .join(Stock, PortfolioHolding.stock_id == Stock.id)
+                .filter(PortfolioHolding.quantity > 0)
+                .all()
+            )
 
             sector_counts = {}
-            for h in holdings:
-                stock = db.query(Stock).filter(Stock.id == h.stock_id).first()
-                if stock:
-                    sector = stock.sector or "Unknown"
-                    sector_counts[sector] = sector_counts.get(sector, 0) + 1
+            for h, stock in rows:
+                sector = stock.sector or "Unknown"
+                sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
             return {
-                "total_holdings": len(holdings),
+                "total_holdings": len(rows),
                 "max_holdings": self.MAX_HOLDINGS,
                 "sector_distribution": sector_counts,
                 "max_position_pct": self.MAX_POSITION_PCT,

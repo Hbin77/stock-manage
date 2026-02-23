@@ -37,9 +37,14 @@ class MarketDataFetcher:
     def __init__(self):
         self._cache: dict[str, yf.Ticker] = {}  # Ticker 객체 캐시
 
+    MAX_CACHE_SIZE = 200  # 캐시 최대 크기 (메모리 누수 방지)
+
     def _get_ticker(self, symbol: str) -> yf.Ticker:
-        """yfinance Ticker 객체 반환 (캐시 활용)"""
+        """yfinance Ticker 객체 반환 (캐시 활용, 최대 200개 제한)"""
         if symbol not in self._cache:
+            if len(self._cache) >= self.MAX_CACHE_SIZE:
+                self._cache.clear()
+                logger.debug(f"[캐시] Ticker 캐시 초과({self.MAX_CACHE_SIZE}개) → 초기화")
             self._cache[symbol] = yf.Ticker(symbol)
         return self._cache[symbol]
 
@@ -94,6 +99,12 @@ class MarketDataFetcher:
             stock.currency = info.get("currency") or getattr(fi, "currency", "USD")
             stock.exchange = info.get("exchange") or getattr(fi, "exchange", None)
             stock.country = info.get("country")
+
+            # Short Interest 데이터
+            stock.short_ratio = info.get("shortRatio")
+            stock.short_pct_of_float = info.get("shortPercentOfFloat")
+            stock.float_shares = info.get("floatShares")
+
             stock.is_active = True
 
             db.flush()
@@ -194,16 +205,35 @@ class MarketDataFetcher:
             # Bulk upsert: N+1 쿼리 문제를 해결하기 위해 sqlite INSERT ... ON CONFLICT 사용
             rows_to_save = []
             for ts, row in df.iterrows():
+                o, h, l, c, v = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"]), int(row["Volume"])
+
+                # OHLCV 유효성 검증
+                if c <= 0:
+                    logger.warning(f"[{ticker}] 유효하지 않은 종가(close={c}) 스킵: {ts}")
+                    continue
+                if v < 0:
+                    logger.warning(f"[{ticker}] 유효하지 않은 거래량(volume={v}) 스킵: {ts}")
+                    continue
+                if h < l:
+                    logger.warning(f"[{ticker}] 고가({h}) < 저가({l}) 스킵: {ts}")
+                    continue
+                if h < c or h < o:
+                    logger.warning(f"[{ticker}] 고가({h}) < 종가({c}) 또는 시가({o}) 스킵: {ts}")
+                    continue
+                if l > c or l > o:
+                    logger.warning(f"[{ticker}] 저가({l}) > 종가({c}) 또는 시가({o}) 스킵: {ts}")
+                    continue
+
                 rows_to_save.append({
                     "stock_id": stock.id,
                     "timestamp": ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
                     "interval": interval,
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
-                    "volume": int(row["Volume"]),
-                    "adj_close": float(row.get("Close", row["Close"])),
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": v,
+                    "adj_close": c,
                 })
 
             for row_data in rows_to_save:
@@ -372,10 +402,12 @@ class MarketDataFetcher:
             for item in news_list:
                 # 중복 체크 (URL 기준)
                 url = item.get("link") or item.get("url")
-                if url:
-                    existing = db.query(MarketNews).filter(MarketNews.url == url).first()
-                    if existing:
-                        continue
+                if not url:
+                    logger.debug(f"[{ticker}] URL 없는 뉴스 스킵: {item.get('title', 'N/A')[:50]}")
+                    continue
+                existing = db.query(MarketNews).filter(MarketNews.url == url).first()
+                if existing:
+                    continue
 
                 published_ts = item.get("providerPublishTime")
                 published_dt = (

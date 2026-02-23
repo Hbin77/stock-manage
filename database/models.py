@@ -23,6 +23,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -57,6 +58,9 @@ class Stock(Base):
     currency: Mapped[str] = mapped_column(String(10), default="USD")
     exchange: Mapped[str | None] = mapped_column(String(50))         # NASDAQ, NYSE, KRX …
     country: Mapped[str | None] = mapped_column(String(50))
+    short_ratio: Mapped[float | None] = mapped_column(Float, default=None)
+    short_pct_of_float: Mapped[float | None] = mapped_column(Float, default=None)
+    float_shares: Mapped[float | None] = mapped_column(Float, default=None)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)   # 모니터링 활성 여부
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -161,6 +165,13 @@ class TechnicalIndicator(Base):
 
     # ATR (평균 진정 범위)
     atr_14: Mapped[float | None] = mapped_column(Float)
+
+    # OBV (On-Balance Volume)
+    obv: Mapped[float | None] = mapped_column(Float, default=None)
+
+    # Stochastic RSI
+    stoch_rsi_k: Mapped[float | None] = mapped_column(Float, default=None)
+    stoch_rsi_d: Mapped[float | None] = mapped_column(Float, default=None)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -313,6 +324,9 @@ class PriceAlert(Base):
     손절가(STOP_LOSS), 목표가(TARGET_PRICE), 거래량 급등(VOLUME_SURGE) 조건 감시
     """
     __tablename__ = "price_alerts"
+    __table_args__ = (
+        Index("ix_price_alerts_stock_type", "stock_id", "alert_type"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks.id"), nullable=False, index=True)
@@ -340,6 +354,9 @@ class AlertHistory(Base):
     중복 방지 및 알림 감사 로그로 활용됩니다.
     """
     __tablename__ = "alert_history"
+    __table_args__ = (
+        Index("ix_alert_history_stock_type_time", "stock_id", "alert_type", "triggered_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     stock_id: Mapped[int] = mapped_column(Integer, ForeignKey("stocks.id"), nullable=False, index=True)
@@ -370,7 +387,7 @@ class MarketNews(Base):
     ticker: Mapped[str | None] = mapped_column(String(20), index=True)  # None = 시장 전반
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text)
-    url: Mapped[str | None] = mapped_column(String(1000))
+    url: Mapped[str | None] = mapped_column(String(1000), unique=True)
     source: Mapped[str | None] = mapped_column(String(100))
     sentiment: Mapped[float | None] = mapped_column(Float)  # -1.0 (부정) ~ +1.0 (긍정)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)

@@ -15,12 +15,27 @@ from database.models import Base
 
 # 엔진 생성
 # SQLite 사용 시 WAL 모드 활성화 → 읽기/쓰기 동시성 향상
-engine = create_engine(
-    settings.DATABASE_URL,
+_is_sqlite = "sqlite" in settings.DATABASE_URL
+
+_engine_kwargs = dict(
     echo=False,           # SQL 로그 출력 여부 (디버깅 시 True)
     pool_pre_ping=True,   # 연결 유효성 사전 확인
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
 )
+
+if _is_sqlite:
+    from sqlalchemy.pool import StaticPool
+    _engine_kwargs.update(
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    _engine_kwargs.update(
+        pool_size=5,
+        max_overflow=10,
+        pool_recycle=3600,
+    )
+
+engine = create_engine(settings.DATABASE_URL, **_engine_kwargs)
 
 
 @event.listens_for(engine, "connect")
@@ -30,6 +45,9 @@ def _set_sqlite_pragma(dbapi_conn, connection_record):
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA wal_autocheckpoint=1000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
 

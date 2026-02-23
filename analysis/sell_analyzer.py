@@ -4,6 +4,7 @@ Google Gemini API를 사용하여 보유 종목의 매도 타이밍을 분석하
 SellSignal 테이블에 저장합니다.
 """
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
@@ -22,8 +23,8 @@ CRITICAL: Respond ONLY with valid JSON matching this exact schema:
     "urgency": "HIGH" | "NORMAL" | "LOW",
     "confidence": <float 0.0-1.0>,
     "suggested_sell_price": <float or null>,
-    "reasoning": "<Korean string, max 500 chars>",
-    "exit_strategy": "<Korean string describing exit approach>",
+    "reasoning": "<string, max 500 chars, in English>",
+    "exit_strategy": "<string describing exit approach, in English>",
     "risk_factors": ["<risk1>", "<risk2>", ...]
 }
 
@@ -33,7 +34,7 @@ Guidelines:
 - SELL: consider selling within a week
 - HOLD: maintain position, no immediate action needed
 - Consider: current PnL %, holding period, RSI (>70 = overbought), MACD trend, Bollinger Band position
-- reasoning and exit_strategy must be in Korean"""
+- reasoning and exit_strategy must be in English"""
 
 
 # ── 헬퍼 함수 ─────────────────────────────────────────────────────────────────
@@ -129,9 +130,19 @@ class SellAnalyzer:
             for r in price_rows
         ]
 
-        # ATR(14) 계산 [J]
+        # 최신 기술적 지표
+        ind = (
+            db.query(TechnicalIndicator)
+            .filter(TechnicalIndicator.stock_id == stock.id)
+            .order_by(TechnicalIndicator.date.desc())
+            .first()
+        )
+
+        # ATR(14): DB 캐시 우선, 없으면 재계산 [J]
         atr_value = None
-        if len(price_rows) >= 15:
+        if ind and ind.atr_14 is not None:
+            atr_value = float(ind.atr_14)
+        elif len(price_rows) >= 15:
             try:
                 import pandas as pd
                 import ta
@@ -148,15 +159,7 @@ class SellAnalyzer:
                 last_atr = atr_series.iloc[-1]
                 atr_value = float(last_atr) if not pd.isna(last_atr) else None
             except Exception as atr_err:
-                logger.debug(f"[{ticker}] ATR 계산 실패 (무시): {atr_err}")
-
-        # 최신 기술적 지표
-        ind = (
-            db.query(TechnicalIndicator)
-            .filter(TechnicalIndicator.stock_id == stock.id)
-            .order_by(TechnicalIndicator.date.desc())
-            .first()
-        )
+                logger.debug(f"[{ticker}] ATR 재계산 실패 (무시): {atr_err}")
 
         # AI 추천 stop_loss 조회 [D]
         ai_stop_loss = None
@@ -193,6 +196,23 @@ class SellAnalyzer:
             }
             for n in news_rows
         ]
+
+        # 기본 재무 데이터 (매도 분석용)
+        fundamentals = {}
+        try:
+            import yfinance as yf
+            yt = yf.Ticker(ticker)
+            info = yt.info
+            fundamentals = {
+                "pe_ratio": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "profit_margin": info.get("profitMargins"),
+                "earnings_growth": info.get("earningsGrowth"),
+                "recommendation_key": info.get("recommendationKey"),
+            }
+        except Exception:
+            pass
 
         # 보유 기간 계산
         holding_days = 0
@@ -270,6 +290,7 @@ class SellAnalyzer:
             "high_watermark": high_watermark,
             "drawdown_from_high_pct": drawdown_from_high_pct,
             "market_context": market_context,
+            "fundamentals": fundamentals,
         }
 
     def _build_sell_prompt(self, context: dict) -> str:
@@ -372,6 +393,25 @@ class SellAnalyzer:
                 prompt_parts.append(f"- [{n.get('published_at', 'N/A')}] {n['title']} ({sentiment_str})")
             prompt_parts.append("")
 
+        # 재무 데이터
+        fundamentals = context.get("fundamentals", {})
+        if fundamentals:
+            fund_lines = ["## Fundamental Data:"]
+            if fundamentals.get("pe_ratio"):
+                fund_lines.append(f"- P/E (trailing): {fundamentals['pe_ratio']:.1f}")
+            if fundamentals.get("forward_pe"):
+                fund_lines.append(f"- P/E (forward): {fundamentals['forward_pe']:.1f}")
+            if fundamentals.get("revenue_growth") is not None:
+                fund_lines.append(f"- Revenue Growth: {fundamentals['revenue_growth']:.1%}")
+            if fundamentals.get("earnings_growth") is not None:
+                fund_lines.append(f"- Earnings Growth: {fundamentals['earnings_growth']:.1%}")
+            if fundamentals.get("profit_margin") is not None:
+                fund_lines.append(f"- Profit Margin: {fundamentals['profit_margin']:.1%}")
+            if fundamentals.get("recommendation_key"):
+                fund_lines.append(f"- Analyst Consensus: {fundamentals['recommendation_key']}")
+            if len(fund_lines) > 1:
+                prompt_parts.extend(fund_lines + [""])
+
         # AI 추천 stop_loss 우선 활용 [D]
         ai_stop_loss = context.get("ai_stop_loss")
         if ai_stop_loss and current_price:
@@ -398,21 +438,40 @@ class SellAnalyzer:
                 "",
             ])
 
-        # Trailing Stop Analysis
+        # Trailing Stop Analysis (ATR-based dynamic trailing stop)
         high_watermark = context.get("high_watermark")
         drawdown_from_high_pct = context.get("drawdown_from_high_pct")
+        current_price_val = holding.get("current_price", 0)
         if high_watermark is not None:
             prompt_parts.extend([
                 "",
                 "## Trailing Stop Analysis:",
-                f"- 보유기간 중 최고가 (High Watermark): ${high_watermark:.2f}",
-                f"- 현재가 대비 최고가 하락률: {drawdown_from_high_pct:+.2f}%",
+                f"- High Watermark (holding period max): ${high_watermark:.2f}",
+                f"- Drawdown from high: {drawdown_from_high_pct:+.2f}%",
             ])
-            if drawdown_from_high_pct is not None and drawdown_from_high_pct <= -10:
-                prompt_parts.append(
-                    f"🔴 WARNING: 최고가 대비 {abs(drawdown_from_high_pct):.1f}% 하락 — "
-                    f"트레일링 스톱(-10%) 기준 초과. 즉각 매도 검토 필요!"
-                )
+
+            # 동적 트레일링 스톱 (ATR 기반)
+            atr = context.get("atr")
+            if drawdown_from_high_pct is not None:
+                if atr and current_price_val > 0:
+                    atr_pct = (3 * atr / current_price_val) * 100
+                    trailing_threshold = max(atr_pct, 5.0)   # 최소 5%
+                    trailing_threshold = min(trailing_threshold, 20.0)  # 최대 20%
+                else:
+                    trailing_threshold = 10.0  # ATR 없으면 기존 10% 사용
+
+                if abs(drawdown_from_high_pct) >= trailing_threshold:
+                    prompt_parts.append(
+                        f"⚠️ CRITICAL: Price down {abs(drawdown_from_high_pct):.1f}% from high watermark. "
+                        f"Dynamic trailing stop ({trailing_threshold:.1f}%, based on 3x ATR) BREACHED. "
+                        f"Immediate sell review required!"
+                    )
+                elif abs(drawdown_from_high_pct) >= trailing_threshold * 0.7:
+                    prompt_parts.append(
+                        f"⚠️ WARNING: Price down {abs(drawdown_from_high_pct):.1f}% from high watermark, "
+                        f"approaching trailing stop ({trailing_threshold:.1f}%). Monitor closely."
+                    )
+
             prompt_parts.append("")
 
         # PnL 기반 특별 경고 (AI stop_loss 보조 기준) [D, M]
@@ -435,6 +494,14 @@ class SellAnalyzer:
                 prompt_parts.append(
                     f"💰 LONG-TERM NOTE: {holding_days}일 보유 중 +{pnl_pct:.1f}% 달성 — 이익실현 고려 (장기 임계값: +40%)"
                 )
+
+        # 세금 최적화 안내 (미국 장기 양도소득세 기준 365일)
+        if 300 <= holding_days <= 365 and pnl_pct > 10:
+            prompt_parts.append(
+                f"TAX NOTE: {365 - holding_days} days until long-term capital gains threshold (365 days). "
+                f"Current gain: +{pnl_pct:.1f}%. Consider holding unless technical breakdown is imminent."
+            )
+            prompt_parts.append("")
 
         prompt_parts.append("\nBased on all the above data, provide your sell signal recommendation as JSON.")
 
@@ -516,7 +583,23 @@ class SellAnalyzer:
             prompt = self._build_sell_prompt(context)
 
             try:
-                response = model.generate_content(prompt)
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        response = model.generate_content(prompt)
+                        break
+                    except Exception as api_err:
+                        last_err = api_err
+                        if attempt < 2:
+                            wait_time = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                            logger.warning(
+                                f"[{ticker}] 매도 API 호출 실패 (시도 {attempt + 1}/3), "
+                                f"{wait_time}초 후 재시도: {api_err}"
+                            )
+                            time.sleep(wait_time)
+                        else:
+                            raise last_err
+
                 parsed = self._parse_response(
                     response.text,
                     current_price=holding_info.get("current_price"),

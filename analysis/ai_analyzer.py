@@ -24,8 +24,21 @@ CRITICAL: Respond ONLY with valid JSON matching this exact schema:
     "target_price": <float or null>,
     "stop_loss": <float or null>,
     "technical_score": <float 0.0-10.0>,
+    // 0-2: Strong bearish (RSI>70, MACD dead cross, below all MAs)
+    // 3-4: Weak bearish / neutral-bearish
+    // 5: Neutral / mixed signals
+    // 6-7: Moderate bullish (RSI recovering, MACD positive, above MA20/50)
+    // 8-10: Strong bullish (golden cross, breakout confirmed with volume)
     "fundamental_score": <float 0.0-10.0>,
+    // 0-2: Overvalued (PE>40, negative margins, high debt)
+    // 3-4: Fairly valued with concerns
+    // 5: Fair value
+    // 6-7: Undervalued (PE<20, positive FCF, moderate growth)
+    // 8-10: Deeply undervalued with strong catalysts
     "sentiment_score": <float 0.0-10.0>,
+    // 0-2: Extremely negative news, analyst downgrades
+    // 5: Neutral / no significant news
+    // 8-10: Very positive catalysts, analyst upgrades
     "reasoning": "<string, max 500 chars, in English>",
     "key_factors": ["<factor1>", "<factor2>", ...],
     "risks": ["<risk1>", "<risk2>", ...]
@@ -130,6 +143,8 @@ class AIAnalyzer:
                 "ma_50": round(ind.ma_50, 2) if ind.ma_50 else None,
                 "ma_200": round(ind.ma_200, 2) if ind.ma_200 else None,
                 "volume_ma_20": round(ind.volume_ma_20, 0) if ind.volume_ma_20 else None,
+                "adx_14": round(ind.adx_14, 2) if ind.adx_14 else None,
+                "atr_14": round(ind.atr_14, 2) if ind.atr_14 else None,
             }
             # MACD 방향 전환 감지 [E]
             macd_crossover = None
@@ -171,6 +186,8 @@ class AIAnalyzer:
             "industry": stock.industry,
             "market_cap": stock.market_cap,
             "exchange": stock.exchange,
+            "short_ratio": stock.short_ratio,
+            "short_pct_of_float": stock.short_pct_of_float,
         }
 
         # 기본 재무 데이터 (fundamental_score 할루시네이션 방지)
@@ -192,6 +209,8 @@ class AIAnalyzer:
                 "debt_to_equity": info.get("debtToEquity"),
                 "roe": info.get("returnOnEquity"),
                 "free_cash_flow": info.get("freeCashflow"),
+                "held_pct_institutions": info.get("heldPercentInstitutions"),
+                "held_pct_insiders": info.get("heldPercentInsiders"),
             }
         except Exception as e:
             logger.debug(f"[{ticker}] 재무 데이터 조회 실패 (무시): {e}")
@@ -219,7 +238,7 @@ class AIAnalyzer:
         market_context = {}
         try:
             from data_fetcher.market_data import market_fetcher as _mf
-            for symbol in ["SPY", "QQQ", "^VIX"]:
+            for symbol in ["SPY", "QQQ", "^VIX", "^TNX"]:
                 data = _mf.fetch_realtime_price(symbol)
                 if data:
                     market_context[symbol] = {
@@ -281,12 +300,30 @@ class AIAnalyzer:
             f"Current Price: ${current_price}" if current_price else "",
             "",
             "## Recent 35-Day Price Data (OHLCV):",
-            json.dumps(prices[-10:], indent=2),  # 최근 10일만 표시
+            json.dumps(prices, separators=(',', ':')),
             "",
             "## Latest Technical Indicators:",
             json.dumps(ind, indent=2),
             "",
         ]
+
+        # Short Interest & Ownership
+        short_ratio = stock.get("short_ratio")
+        short_pct = stock.get("short_pct_of_float")
+        inst_pct = context.get("fundamentals", {}).get("held_pct_institutions")
+        insider_pct = context.get("fundamentals", {}).get("held_pct_insiders")
+
+        ownership_lines = []
+        if short_ratio is not None:
+            ownership_lines.append(f"- Short Ratio: {short_ratio:.1f} days to cover")
+        if short_pct is not None:
+            ownership_lines.append(f"- Short % of Float: {short_pct:.1%}")
+        if inst_pct is not None:
+            ownership_lines.append(f"- Institutional Ownership: {inst_pct:.1%}")
+        if insider_pct is not None:
+            ownership_lines.append(f"- Insider Ownership: {insider_pct:.1%}")
+        if ownership_lines:
+            prompt_parts.extend(["## Ownership & Short Interest:"] + ownership_lines + [""])
 
         # 재무 데이터 (Fundamental Data)
         fundamentals = context.get("fundamentals", {})
@@ -330,16 +367,16 @@ class AIAnalyzer:
             signals = []
             if rsi is not None:
                 if rsi < 30:
-                    signals.append(f"RSI={rsi:.1f} (OVERSOLD - bullish signal)")
+                    signals.append(f"RSI={rsi:.1f} (below 30 threshold)")
                 elif rsi > 70:
-                    signals.append(f"RSI={rsi:.1f} (OVERBOUGHT - caution)")
+                    signals.append(f"RSI={rsi:.1f} (above 70 threshold)")
                 else:
                     signals.append(f"RSI={rsi:.1f} (neutral)")
             # MACD: 방향 전환 우선 표시 [E]
             if macd_crossover == "GOLDEN_CROSS":
-                signals.append(f"MACD Histogram: GOLDEN CROSS 발생 ({macd_hist:.4f}) — 강한 매수 신호")
+                signals.append(f"MACD Histogram: crossed from negative to positive ({macd_hist:.4f})")
             elif macd_crossover == "DEAD_CROSS":
-                signals.append(f"MACD Histogram: DEAD CROSS 발생 ({macd_hist:.4f}) — 하락 전환 주의")
+                signals.append(f"MACD Histogram: crossed from positive to negative ({macd_hist:.4f})")
             elif macd_hist is not None:
                 signals.append(f"MACD Histogram={'positive' if macd_hist > 0 else 'negative'} ({macd_hist:.4f})")
             if current_price and bb_upper and bb_lower:
@@ -352,6 +389,15 @@ class AIAnalyzer:
                 pct_from_ma50 = (current_price - ma_50) / ma_50 * 100
                 signals.append(f"Price vs MA50: {pct_from_ma50:+.2f}%")
 
+            adx = ind.get("adx_14")
+            if adx is not None:
+                if adx > 25:
+                    signals.append(f"ADX={adx:.1f} (strong trend)")
+                elif adx > 20:
+                    signals.append(f"ADX={adx:.1f} (developing trend)")
+                else:
+                    signals.append(f"ADX={adx:.1f} (weak/no trend, range-bound)")
+
             if signals:
                 prompt_parts.extend(["## Technical Signal Summary:", *[f"- {s}" for s in signals], ""])
 
@@ -363,14 +409,18 @@ class AIAnalyzer:
             qqq = market_ctx.get("QQQ")
             vix = market_ctx.get("^VIX")
             if spy:
-                trend = "상승" if spy["change_pct"] > 0 else "하락"
+                trend = "bullish" if spy["change_pct"] > 0 else "bearish"
                 market_lines.append(f"- SPY: ${spy['price']:.2f} ({spy['change_pct']:+.2f}%) — {trend}")
             if qqq:
-                trend = "상승" if qqq["change_pct"] > 0 else "하락"
+                trend = "bullish" if qqq["change_pct"] > 0 else "bearish"
                 market_lines.append(f"- QQQ: ${qqq['price']:.2f} ({qqq['change_pct']:+.2f}%) — {trend}")
             if vix:
-                vix_level = "HIGH(공포)" if vix["price"] > 30 else ("ELEVATED(경계)" if vix["price"] > 20 else "LOW(안정)")
+                vix_level = "HIGH(fear)" if vix["price"] > 30 else ("ELEVATED(caution)" if vix["price"] > 20 else "LOW(stable)")
                 market_lines.append(f"- VIX: {vix['price']:.2f} ({vix_level})")
+            tnx = market_ctx.get("^TNX")
+            if tnx:
+                rate_env = "high-rate environment" if tnx["price"] > 4.5 else ("moderate rates" if tnx["price"] > 3.0 else "low rates")
+                market_lines.append(f"- 10Y Treasury Yield: {tnx['price']:.2f}% ({rate_env})")
             prompt_parts.extend(market_lines + [""])
 
         # 실적발표일 경고 [K]
@@ -510,10 +560,11 @@ class AIAnalyzer:
                     except Exception as api_err:
                         last_err = api_err
                         if attempt < 2:
+                            wait_time = 5 * (2 ** attempt)  # 5s, 10s, 20s
                             logger.warning(
-                                f"[{ticker}] API 호출 실패 (시도 {attempt + 1}/3), 5초 후 재시도: {api_err}"
+                                f"[{ticker}] API 호출 실패 (시도 {attempt + 1}/3), {wait_time}초 후 재시도: {api_err}"
                             )
-                            time.sleep(5)
+                            time.sleep(wait_time)
                         else:
                             raise last_err
                 parsed = self._parse_response(
@@ -524,7 +575,17 @@ class AIAnalyzer:
                 logger.error(f"[{ticker}] AI API 호출 실패: {e}")
                 return None
 
-            # 신뢰도 임계값 미달 시 HOLD로 다운그레이드 [A]
+            # 1. VIX 신뢰도 감쇄 (시그모이드 기반)
+            vix_data = context.get("market_context", {}).get("^VIX")
+            if vix_data:
+                vix_level = vix_data.get("price")
+                if vix_level is not None and vix_level > 20:
+                    import math
+                    normalized = (vix_level - 20) / 15  # 0 at VIX=20, 1 at VIX=35
+                    vix_penalty = 0.3 * (1 / (1 + math.exp(-3 * (normalized - 0.5))))
+                    parsed["confidence"] = round(parsed["confidence"] * (1 - vix_penalty), 2)
+
+            # 2. 신뢰도 임계값 체크 (VIX 조정 후 최종 게이트)
             threshold = settings.BUY_CONFIDENCE_THRESHOLD
             if parsed["action"] in ("BUY", "STRONG_BUY") and parsed["confidence"] < threshold:
                 logger.info(
@@ -532,21 +593,26 @@ class AIAnalyzer:
                     f"→ HOLD 다운그레이드 (원래: {parsed['action']})"
                 )
                 parsed["action"] = "HOLD"
+                parsed["confidence"] = round(parsed["confidence"] * 0.7, 2)
 
-            # VIX 하드 필터: 높은 변동성 시기에 매수 신호 다운그레이드
-            vix_data = context.get("market_context", {}).get("^VIX")
+            # 3. VIX 극단적 수준에서 STRONG_BUY 다운그레이드만
             if vix_data:
-                vix_level = vix_data.get("price", 0)
-                if vix_level > 40 and parsed["action"] in ("BUY", "STRONG_BUY"):
-                    logger.info(
-                        f"[{ticker}] VIX={vix_level:.1f} > 40 → HOLD 다운그레이드 (원래: {parsed['action']})"
-                    )
-                    parsed["action"] = "HOLD"
-                elif vix_level > 30 and parsed["action"] == "STRONG_BUY":
-                    logger.info(
-                        f"[{ticker}] VIX={vix_level:.1f} > 30 → BUY 다운그레이드 (원래: STRONG_BUY)"
-                    )
+                vix_level = vix_data.get("price")
+                if vix_level is not None and vix_level > 35 and parsed["action"] == "STRONG_BUY":
                     parsed["action"] = "BUY"
+                    logger.info(f"[{ticker}] VIX {vix_level:.1f} > 35 → BUY 다운그레이드")
+
+            # 신뢰도 보정: 과거 백테스팅 정확도 반영
+            try:
+                from analysis.backtester import backtester as _bt
+                breakdown = _bt.get_action_breakdown(days=90)
+                action_stats = {b["action"]: b for b in breakdown}
+                if parsed["action"] in action_stats:
+                    hist_win_rate = action_stats[parsed["action"]]["win_rate"] / 100.0
+                    calibrated = 0.7 * parsed["confidence"] + 0.3 * hist_win_rate
+                    parsed["confidence"] = round(calibrated, 2)
+            except Exception:
+                pass
 
             # 리스크 매니저 연동: BUY/STRONG_BUY인 경우 리스크 체크
             if parsed["action"] in ("BUY", "STRONG_BUY"):
@@ -649,7 +715,7 @@ class AIAnalyzer:
                 if ind.rsi_14 is not None:
                     if ind.rsi_14 < 35:
                         if not below_ma200:
-                            score += 3.0
+                            score += 2.0
                         else:
                             logger.debug(f"[{ticker}] RSI={ind.rsi_14:.1f} < 35이지만 MA200 아래 → 점수 미부여 (떨어지는 칼 방지)")
                     elif ind.rsi_14 < 45:
@@ -687,7 +753,19 @@ class AIAnalyzer:
                     if current_price > ind.ma_200:
                         score += 2.0   # 장기 상승 추세
                     else:
-                        score -= 3.0   # 장기 하락 추세 페널티 (강화)
+                        score -= 1.0   # 장기 하락 추세 페널티
+
+                # ADX 추세 강도 보너스
+                if ind.adx_14 is not None:
+                    if ind.adx_14 > 25:
+                        score += 2.0   # 강한 추세 진행 중
+                    elif ind.adx_14 > 20:
+                        score += 1.0   # 보통 추세
+
+                # RSI 모멘텀 존 (50-65) - 상승 추세 중 건전한 영역
+                if ind.rsi_14 is not None and 50 <= ind.rsi_14 <= 65:
+                    if current_price and ind.ma_50 and current_price > ind.ma_50:
+                        score += 2.0   # 상승 추세 + 건전한 RSI
 
                 # 볼린저밴드 하단 근처 — 거래량 조건부 스코어링 [H]
                 if (current_price and ind.bb_upper and ind.bb_lower and
@@ -739,13 +817,17 @@ class AIAnalyzer:
             tickers = all_tickers
             logger.info(f"[AI 분석] 전체 종목 분석 시작: {tickers}")
 
-        for ticker in tickers:
+        import time
+        for i, ticker in enumerate(tickers):
             try:
                 rec = self.analyze_ticker(ticker)
                 results[ticker] = rec.action if rec else "ERROR"
             except Exception as e:
                 logger.error(f"[{ticker}] 분석 중 예외 발생: {e}")
                 results[ticker] = "ERROR"
+            # Rate limit: API 호출 간 2초 대기
+            if i < len(tickers) - 1:
+                time.sleep(2)
 
         buy_count = sum(1 for a in results.values() if a in ("BUY", "STRONG_BUY"))
         logger.info(f"[AI 분석] 완료 — 매수 추천: {buy_count}/{len(tickers)}개")

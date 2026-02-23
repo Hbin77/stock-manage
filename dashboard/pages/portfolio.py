@@ -13,6 +13,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import yfinance as yf
+
 from notifications.alert_manager import alert_manager
 from portfolio.portfolio_manager import portfolio_manager
 
@@ -44,6 +46,18 @@ def _get_sector_allocation():
     return portfolio_manager.get_sector_allocation()
 
 
+@st.cache_data(ttl=3600)
+def _get_spy_ytd_return():
+    try:
+        spy = yf.Ticker("SPY")
+        hist = spy.history(period="ytd")
+        if not hist.empty:
+            return ((hist["Close"].iloc[-1] / hist["Close"].iloc[0]) - 1) * 100
+    except Exception:
+        pass
+    return None
+
+
 def _style_alert_row(row: pd.Series) -> list[str]:
     """알림 유형에 따라 행 배경색을 반환합니다."""
     alert_type = row.get("유형", "")
@@ -59,7 +73,8 @@ def _style_alert_row(row: pd.Series) -> list[str]:
 def render():
     st.header("💼 포트폴리오 현황")
 
-    summary = _get_portfolio_data()
+    with st.spinner("포트폴리오 데이터 로딩 중..."):
+        summary = _get_portfolio_data()
     holdings = summary.get("holdings", [])
 
     # ── 1. 상단 메트릭 5개 ───────────────────────────────────────────────────
@@ -123,6 +138,14 @@ def render():
             fig.update_traces(textposition="inside", textinfo="percent+label")
             fig.update_layout(showlegend=True, margin=dict(t=20, b=20, l=20, r=20))
             st.plotly_chart(fig, use_container_width=True)
+
+        csv = display_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="CSV 다운로드",
+            data=csv,
+            file_name=f"portfolio_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
 
         st.caption("열 머리글을 클릭하면 해당 열 기준으로 오름차순/내림차순 정렬이 됩니다.")
         st.caption(f"기준 시각: {summary.get('updated_at', 'N/A')}")
@@ -233,7 +256,10 @@ def render():
             del_options = {f"{h['ticker']} - {h['name']} ({h['quantity']:.4f}주)": h["ticker"] for h in holdings}
             selected_del = st.selectbox("삭제할 종목 선택", list(del_options.keys()), key="del_ticker")
             del_ticker = del_options[selected_del]
-            del_holding = next(h for h in holdings if h["ticker"] == del_ticker)
+            del_holding = next((h for h in holdings if h["ticker"] == del_ticker), None)
+            if del_holding is None:
+                st.error("종목을 찾을 수 없습니다.")
+                st.stop()
 
             dc1, dc2, dc3 = st.columns(3)
             dc1.metric("보유 수량", f"{del_holding['quantity']:.4f}주")
@@ -340,6 +366,13 @@ def render():
                 use_container_width=True,
                 hide_index=True,
             )
+            tx_csv = tx_display.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="거래이력 CSV 다운로드",
+                data=tx_csv,
+                file_name=f"transactions_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
 
     with tab_chart:
         realized_data = _get_realized_pnl()
@@ -369,11 +402,26 @@ def render():
                     height=350,
                 )
                 st.plotly_chart(fig_pnl, use_container_width=True)
-                st.metric(
-                    "총 실현손익",
-                    f"${realized_data.get('total_realized', 0):+,.2f}",
-                    delta_color="normal",
-                )
+                pnl_col, spy_col = st.columns(2)
+                with pnl_col:
+                    st.metric(
+                        "총 실현손익",
+                        f"${realized_data.get('total_realized', 0):+,.2f}",
+                        delta_color="normal",
+                    )
+                with spy_col:
+                    spy_ytd = _get_spy_ytd_return()
+                    portfolio_pnl_pct = summary.get("total_unrealized_pnl_pct", 0)
+                    if spy_ytd is not None:
+                        diff = portfolio_pnl_pct - spy_ytd
+                        st.metric(
+                            "SPY YTD 수익률",
+                            f"{spy_ytd:+.2f}%",
+                            delta=f"포트폴리오 대비 {diff:+.2f}%p",
+                            delta_color="normal",
+                        )
+                    else:
+                        st.metric("SPY YTD 수익률", "N/A")
             else:
                 st.info("실현손익 데이터가 없습니다.")
 

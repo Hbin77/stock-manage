@@ -92,7 +92,7 @@ class PortfolioManager:
                 # 평균 매수가 재계산 (기존 투자금 + 신규 투자금) / 총 수량
                 new_quantity = holding.quantity + quantity
                 new_invested = holding.total_invested + total_amount
-                holding.avg_buy_price = (new_invested - fee) / new_quantity  # 수수료 제외
+                holding.avg_buy_price = new_invested / new_quantity
                 holding.quantity = new_quantity
                 holding.total_invested = new_invested
 
@@ -193,12 +193,13 @@ class PortfolioManager:
         results = []
 
         with get_db() as db:
-            holdings = db.query(PortfolioHolding).all()
+            rows = (
+                db.query(PortfolioHolding, Stock)
+                .join(Stock, PortfolioHolding.stock_id == Stock.id)
+                .all()
+            )
 
-            for h in holdings:
-                stock = db.query(Stock).filter(Stock.id == h.stock_id).first()
-                if stock is None:
-                    continue
+            for h, stock in rows:
 
                 current_price = h.current_price or h.avg_buy_price
 

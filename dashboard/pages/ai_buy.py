@@ -230,6 +230,7 @@ def render():
             # 정확도 지표
             executed = df[df["is_executed"] == True] if "is_executed" in df.columns else pd.DataFrame()
             if not executed.empty and "outcome_return" in executed.columns:
+                executed = executed.dropna(subset=["outcome_return"])
                 profitable = executed[executed["outcome_return"] > 0]
                 accuracy = len(profitable) / len(executed) * 100 if len(executed) > 0 else 0
                 avg_return = executed["outcome_return"].mean()
@@ -251,8 +252,27 @@ def render():
             if "결과(%)" in display_df.columns:
                 format_dict["결과(%)"] = lambda x: f"{x:+.2f}%" if pd.notna(x) else "-"
 
+            PAGE_SIZE = 50
+            total_rows = len(display_df)
+            if total_rows > PAGE_SIZE:
+                total_pages = (total_rows + PAGE_SIZE - 1) // PAGE_SIZE
+                page = st.number_input(
+                    "페이지",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=1,
+                    step=1,
+                    key="ai_buy_page",
+                )
+                start_idx = (page - 1) * PAGE_SIZE
+                end_idx = start_idx + PAGE_SIZE
+                page_df = display_df.iloc[start_idx:end_idx]
+                st.caption(f"{total_rows}건 중 {start_idx + 1}~{min(end_idx, total_rows)}건 표시 (총 {total_pages}페이지)")
+            else:
+                page_df = display_df
+
             st.dataframe(
-                display_df.style.format(format_dict),
+                page_df.style.format(format_dict),
                 use_container_width=True,
                 hide_index=True,
             )

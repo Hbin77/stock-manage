@@ -34,7 +34,6 @@ def _now() -> datetime:
 class Backtester:
     """AI 추천 결과 사후 검증 엔진"""
 
-    LOOKBACK_WINDOWS: LookbackWindows = [5, 10, 30]
     TRADING_COST: float = 0.003  # 0.3% = 수수료 0.1% + 슬리피지 0.2%
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────────────────────
@@ -58,20 +57,85 @@ class Backtester:
             "avg_return": round(sum(returns) / len(returns), 4),
         }
 
+    @staticmethod
+    def _calc_spy_alpha(with_outcomes: list[tuple], db) -> float | None:
+        """
+        SPY 벤치마크 대비 초과수익(alpha)을 계산합니다.
+
+        각 추천에 대해 동일 기간(추천일~결과일)의 SPY 수익률을 구하고,
+        alpha = 추천 수익률 - SPY 수익률 의 평균을 반환합니다.
+
+        Args:
+            with_outcomes: [(AIRecommendation, ticker)] 결과가 있는 추천 목록
+            db: SQLAlchemy 세션
+
+        Returns:
+            평균 alpha (float) 또는 None (SPY 데이터 부족 시)
+        """
+        spy_stock = db.query(Stock).filter(Stock.ticker == "SPY").first()
+        if spy_stock is None:
+            return None
+
+        alphas: list[float] = []
+        for rec, _ in with_outcomes:
+            rec_date = rec.recommendation_date
+            # 추천일의 SPY 종가
+            spy_at_rec = (
+                db.query(PriceHistory)
+                .filter(
+                    and_(
+                        PriceHistory.stock_id == spy_stock.id,
+                        PriceHistory.interval == "1d",
+                        PriceHistory.timestamp >= rec_date,
+                    )
+                )
+                .order_by(PriceHistory.timestamp.asc())
+                .first()
+            )
+            if spy_at_rec is None or spy_at_rec.close <= 0:
+                continue
+
+            # outcome 시점: outcome_price가 기록된 날짜 근사 (가장 긴 윈도우 기준)
+            # outcome_price는 update_outcomes에서 설정된 종가이므로,
+            # 해당 시점의 SPY 가격을 조회
+            outcome_date = rec_date + timedelta(days=30)  # 최대 윈도우
+            spy_at_outcome = (
+                db.query(PriceHistory)
+                .filter(
+                    and_(
+                        PriceHistory.stock_id == spy_stock.id,
+                        PriceHistory.interval == "1d",
+                        PriceHistory.timestamp >= outcome_date,
+                    )
+                )
+                .order_by(PriceHistory.timestamp.asc())
+                .first()
+            )
+            if spy_at_outcome is None or spy_at_outcome.close <= 0:
+                continue
+
+            spy_return = ((spy_at_outcome.close - spy_at_rec.close) / spy_at_rec.close) * 100
+            alpha = rec.outcome_return - spy_return
+            alphas.append(alpha)
+
+        if not alphas:
+            return None
+
+        return round(sum(alphas) / len(alphas), 4)
+
     # ── 공개 메서드 ────────────────────────────────────────────────────────────
 
     def update_outcomes(self, lookback_windows: LookbackWindows | None = None) -> int:
         """
         outcome_return이 null인 AIRecommendation 레코드에 대해
-        추천일 이후 가격 데이터를 조회하여 수익률을 계산합니다.
+        추천일 이후 30일 가격 데이터를 조회하여 수익률을 계산합니다.
 
         Args:
-            lookback_windows: 검증할 영업일 윈도우 목록 (기본: [5, 10, 30])
+            lookback_windows: 하위 호환용 파라미터 (무시됨, 30일 고정)
 
         Returns:
             업데이트된 레코드 수 (int)
         """
-        windows = lookback_windows or self.LOOKBACK_WINDOWS
         today = _now()
         updated = 0
 
@@ -98,32 +162,29 @@ class Backtester:
                     logger.warning(f"[백테스팅] 비정상 추천가 스킵: rec_id={rec.id} price={price_at_rec}")
                     continue
 
-                # 모든 윈도우를 순회하며 가장 긴 기간의 수익률을 사용
-                outcome_close = None
-                for days in sorted(windows):
-                    target_date = rec_date + timedelta(days=days)
-                    if today < target_date:
-                        continue
-
-                    row = (
-                        db.query(PriceHistory)
-                        .filter(
-                            and_(
-                                PriceHistory.stock_id == rec.stock_id,
-                                PriceHistory.interval == "1d",
-                                PriceHistory.timestamp >= target_date,
-                            )
-                        )
-                        .order_by(PriceHistory.timestamp.asc())
-                        .first()
-                    )
-                    if row:
-                        outcome_close = row.close
-
-                if outcome_close is None:
+                # 30일 고정 윈도우로 통일 (평가 기간 일관성)
+                target_date = rec_date + timedelta(days=30)
+                if today < target_date:
                     continue
 
-                outcome_return = ((outcome_close - price_at_rec) / price_at_rec - self.TRADING_COST) * 100
+                row = (
+                    db.query(PriceHistory)
+                    .filter(
+                        and_(
+                            PriceHistory.stock_id == rec.stock_id,
+                            PriceHistory.interval == "1d",
+                            PriceHistory.timestamp >= target_date,
+                        )
+                    )
+                    .order_by(PriceHistory.timestamp.asc())
+                    .first()
+                )
+                if row is None:
+                    continue
+
+                outcome_close = row.close
+
+                outcome_return = ((outcome_close - price_at_rec) / price_at_rec) * 100 - (self.TRADING_COST * 100)
                 rec.outcome_price = outcome_close
                 rec.outcome_return = round(outcome_return, 4)
                 updated += 1
@@ -164,7 +225,10 @@ class Backtester:
             )
 
             total = len(recs)
-            with_outcomes = [(r, t) for r, t in recs if r.outcome_return is not None]
+            with_outcomes = [
+                (r, t) for r, t in recs
+                if r.outcome_return is not None and r.action in ("BUY", "STRONG_BUY")
+            ]
             n_outcomes = len(with_outcomes)
 
             if n_outcomes == 0:
@@ -179,13 +243,15 @@ class Backtester:
                     "worst_ticker": None,
                     "worst_return": None,
                     "sharpe_proxy": None,
+                    "spy_alpha": None,
                 }
 
             returns = [r.outcome_return for r, _ in with_outcomes]
             stats = self._group_stats(returns, trading_cost_pct=self.TRADING_COST * 100)
             med_return = median(returns)
-            # TODO: SPY 벤치마크 대비 초과수익(alpha) 계산 추가
-            # - 동일 기간 SPY 수익률 조회 후 alpha = avg_return - spy_return 산출
+
+            # SPY 벤치마크 대비 초과수익(alpha) 계산
+            spy_alpha = self._calc_spy_alpha(with_outcomes, db)
 
             # Sharpe proxy: avg / std (단순 근사)
             sharpe_proxy = None
@@ -209,6 +275,7 @@ class Backtester:
                 "worst_ticker": worst[1],
                 "worst_return": round(worst[0].outcome_return, 4),
                 "sharpe_proxy": sharpe_proxy,
+                "spy_alpha": spy_alpha,
             }
 
     def get_action_breakdown(self, days: int = 90) -> ActionBreakdown:

@@ -386,7 +386,7 @@ class DataScheduler:
         """스케줄러를 안전하게 종료합니다."""
         if not self._running:
             return
-        self._scheduler.shutdown(wait=False)
+        self._scheduler.shutdown(wait=True)
         self._running = False
         logger.info("데이터 수집 스케줄러 종료됨")
 
