@@ -60,6 +60,28 @@ SessionLocal = sessionmaker(
 )
 
 
+def _migrate_add_columns() -> None:
+    """기존 테이블에 누락된 컬럼을 자동 추가합니다 (SQLite ALTER TABLE)."""
+    if not _is_sqlite:
+        return
+    migrations = [
+        ("stocks", "short_ratio", "FLOAT"),
+        ("stocks", "short_pct_of_float", "FLOAT"),
+        ("stocks", "float_shares", "FLOAT"),
+        ("technical_indicators", "obv", "FLOAT"),
+        ("technical_indicators", "stoch_rsi_k", "FLOAT"),
+        ("technical_indicators", "stoch_rsi_d", "FLOAT"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in migrations:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                conn.commit()
+                logger.info(f"[마이그레이션] {table}.{column} 컬럼 추가 완료")
+            except Exception:
+                conn.rollback()  # 이미 존재하면 무시
+
+
 def init_db() -> None:
     """
     데이터베이스 초기화: 모든 테이블 생성
@@ -67,6 +89,7 @@ def init_db() -> None:
     """
     logger.info("데이터베이스 초기화 중...")
     Base.metadata.create_all(bind=engine, checkfirst=True)
+    _migrate_add_columns()
     logger.success("데이터베이스 초기화 완료")
 
 
