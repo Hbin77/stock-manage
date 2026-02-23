@@ -119,7 +119,7 @@ def job_stock_info_sync():
 
 
 def job_daily_ai_analysis():
-    """AI 매수 추천 분석 (평일 장전 08:30)"""
+    """AI 매수 추천 분석 (평일 장 개장 09:30 ET = KST 23:30)"""
     if not _is_nyse_trading_day():
         logger.debug("[스케줄] 휴장일, AI 매수 분석 스킵")
         return
@@ -149,7 +149,7 @@ def job_daily_ai_analysis():
 
 
 def job_sell_analysis():
-    """보유 종목 매도 신호 분석 (평일 장 시작 후 09:30)"""
+    """보유 종목 매도 신호 분석 (평일 장 개장 30분 후 10:00 ET)"""
     if not _is_nyse_trading_day():
         logger.debug("[스케줄] 휴장일, AI 매도 분석 스킵")
         return
@@ -313,21 +313,21 @@ class DataScheduler:
             replace_existing=True,
         )
 
-        # 5. AI 매수 추천 분석 (평일 오전 8시 30분 — 장 개장 전)
+        # 5. AI 매수 추천 분석 (평일 오전 9시 30분 — 장 개장 시)
         self._scheduler.add_job(
             job_daily_ai_analysis,
-            trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=30),
+            trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=30),
             id="daily_ai_analysis",
-            name="AI 매수 추천 분석 (장전)",
+            name="AI 매수 추천 분석 (장 개장 시)",
             replace_existing=True,
         )
 
-        # 6. AI 매도 신호 분석 (평일 오전 9시 30분 — 장 개장 후)
+        # 6. AI 매도 신호 분석 (평일 오전 10시 — 장 개장 30분 후)
         self._scheduler.add_job(
             job_sell_analysis,
-            trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=30),
+            trigger=CronTrigger(day_of_week="mon-fri", hour=10, minute=0),
             id="sell_analysis",
-            name="AI 매도 신호 분석 (장 개장 후)",
+            name="AI 매도 신호 분석 (장 개장 30분 후)",
             replace_existing=True,
         )
 
