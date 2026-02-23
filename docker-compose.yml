@@ -43,6 +43,7 @@ services:
   dashboard:
     build: .
     container_name: stock-manage-dashboard
+    entrypoint: ["/app/docker-entrypoint.sh"]
     command: >
       streamlit run dashboard/app.py
       --server.port=8085
