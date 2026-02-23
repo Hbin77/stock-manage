@@ -61,25 +61,30 @@ SessionLocal = sessionmaker(
 
 
 def _migrate_add_columns() -> None:
-    """기존 테이블에 누락된 컬럼을 자동 추가합니다 (SQLite ALTER TABLE)."""
+    """SQLAlchemy 모델 기준으로 기존 테이블에 누락된 컬럼을 자동 추가합니다."""
     if not _is_sqlite:
         return
-    migrations = [
-        ("stocks", "short_ratio", "FLOAT"),
-        ("stocks", "short_pct_of_float", "FLOAT"),
-        ("stocks", "float_shares", "FLOAT"),
-        ("technical_indicators", "obv", "FLOAT"),
-        ("technical_indicators", "stoch_rsi_k", "FLOAT"),
-        ("technical_indicators", "stoch_rsi_d", "FLOAT"),
-    ]
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
     with engine.connect() as conn:
-        for table, column, col_type in migrations:
-            try:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-                conn.commit()
-                logger.info(f"[마이그레이션] {table}.{column} 컬럼 추가 완료")
-            except Exception:
-                conn.rollback()  # 이미 존재하면 무시
+        for table in Base.metadata.tables.values():
+            if not inspector.has_table(table.name):
+                continue
+            existing_cols = {c["name"] for c in inspector.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing_cols:
+                    continue
+                # SQLAlchemy 타입 → SQLite 타입 매핑
+                col_type = col.type.compile(engine.dialect)
+                try:
+                    conn.execute(text(
+                        f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type}"
+                    ))
+                    conn.commit()
+                    logger.info(f"[마이그레이션] {table.name}.{col.name} ({col_type}) 추가 완료")
+                except Exception:
+                    conn.rollback()
 
 
 def init_db() -> None:
