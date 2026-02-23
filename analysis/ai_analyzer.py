@@ -56,16 +56,16 @@ Evaluate ONLY from provided news items and their sentiment values:
 
 ### Step 6: Derive Action
 Calculate weighted_score = (technical * 0.45) + (fundamental * 0.30) + (sentiment * 0.25)
-- STRONG_BUY: weighted_score >= 7.5 AND technical_score >= 7 AND confidence >= 0.80
-- BUY: weighted_score >= 6.0 AND technical_score >= 5 AND confidence >= 0.65
+- STRONG_BUY: weighted_score >= 7.0 AND technical_score >= 6.5 AND confidence >= 0.75
+- BUY: weighted_score >= 5.5 AND technical_score >= 4.5 AND confidence >= 0.55
 - HOLD: below BUY thresholds
-IMPORTANT: If technical_score >= 7 but you output HOLD, you MUST explain why in reasoning.
+IMPORTANT: If technical_score >= 6 but you output HOLD, you MUST explain why in reasoning.
 
 ### Confidence Definition
 confidence = probability of positive return within 2-4 weeks:
 - 0.90+: All signals aligned, strong catalyst
 - 0.75-0.89: Most signals bullish, minor concerns
-- 0.60-0.74: Bullish lean but notable risks
+- 0.55-0.74: Bullish lean but notable risks — sufficient for BUY
 - 0.40-0.59: Mixed signals, uncertain
 - <0.40: Mostly bearish or insufficient data
 
@@ -662,15 +662,13 @@ class AIAnalyzer:
                 logger.error(f"[{ticker}] AI API 호출 실패: {e}")
                 return None
 
-            # 1. VIX 신뢰도 감쇄 (시그모이드 기반)
+            # 1. VIX 신뢰도 감쇄 (극단적 공포 시에만 — 프롬프트가 이미 VIX 20-30 처리)
             vix_data = context.get("market_context", {}).get("^VIX")
             if vix_data:
                 vix_level = vix_data.get("price")
-                if vix_level is not None and vix_level > 20:
-                    import math
-                    normalized = (vix_level - 20) / 15  # 0 at VIX=20, 1 at VIX=35
-                    vix_penalty = 0.15 * (1 / (1 + math.exp(-3 * (normalized - 0.5))))
-                    parsed["confidence"] = round(parsed["confidence"] * (1 - vix_penalty), 2)
+                if vix_level is not None and vix_level > 30:
+                    penalty = min(0.10, (vix_level - 30) / 100)
+                    parsed["confidence"] = round(parsed["confidence"] * (1 - penalty), 2)
 
             # 2. 신뢰도 임계값 체크 (VIX 조정 후 최종 게이트)
             threshold = settings.BUY_CONFIDENCE_THRESHOLD
@@ -680,24 +678,25 @@ class AIAnalyzer:
                     f"→ HOLD 다운그레이드 (원래: {parsed['action']})"
                 )
                 parsed["action"] = "HOLD"
-                parsed["confidence"] = round(parsed["confidence"] * 0.7, 2)
+                # confidence 유지 — 이미 낮은 값을 추가 감쇄하지 않음
 
             # 3. VIX 극단적 수준에서 STRONG_BUY 다운그레이드만
-            if vix_data:
+            if vix_data and isinstance(vix_data, dict):
                 vix_level = vix_data.get("price")
                 if vix_level is not None and vix_level > 35 and parsed["action"] == "STRONG_BUY":
                     parsed["action"] = "BUY"
                     logger.info(f"[{ticker}] VIX {vix_level:.1f} > 35 → BUY 다운그레이드")
 
-            # 신뢰도 보정: 과거 백테스팅 정확도 반영
+            # 신뢰도 보정: 과거 성과가 좋을 때만 상향 (하향 감쇄 금지)
             try:
                 from analysis.backtester import backtester as _bt
                 breakdown = _bt.get_action_breakdown(days=90)
                 action_stats = {b["action"]: b for b in breakdown}
                 if parsed["action"] in action_stats:
                     hist_win_rate = action_stats[parsed["action"]]["win_rate"] / 100.0
-                    calibrated = 0.7 * parsed["confidence"] + 0.3 * hist_win_rate
-                    parsed["confidence"] = round(calibrated, 2)
+                    if hist_win_rate > parsed["confidence"]:
+                        calibrated = 0.85 * parsed["confidence"] + 0.15 * hist_win_rate
+                        parsed["confidence"] = round(calibrated, 2)
             except Exception:
                 pass
 
@@ -757,7 +756,7 @@ class AIAnalyzer:
         watchlist = ALL_TICKERS
         scores: dict[str, float] = {}
 
-        cutoff_date = datetime.now() - timedelta(days=3)
+        cutoff_date = datetime.now() - timedelta(days=5)  # 주말+공휴일 대비
 
         # ── STEP 0: Market Regime Detection ──
         regime_mom_w = 0.65  # default: 65% momentum, 35% reversion
