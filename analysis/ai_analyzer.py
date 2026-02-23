@@ -12,44 +12,86 @@ from config.settings import settings
 from database.connection import get_db
 from database.models import AIRecommendation, MarketNews, PriceHistory, Stock, TechnicalIndicator
 
-SYSTEM_PROMPT = """You are an expert US stock market analyst specializing in technical and fundamental analysis.
-Analyze the provided stock data and generate a buy recommendation.
+SYSTEM_PROMPT = """You are a quantitative equity analyst running a systematic stock screening process for US equities.
+Your task: evaluate whether a stock is a BUY candidate for a SWING TRADE (1-4 week holding period).
 
-IMPORTANT: Only base your analysis on the provided data. Do not assume or fabricate any information not given. If data is insufficient, reflect that in lower confidence.
+## DECISION FRAMEWORK (apply in this exact order)
 
-CRITICAL: Respond ONLY with valid JSON matching this exact schema:
+### Step 1: Technical Score (0-10)
+Evaluate ONLY from the provided indicator data:
+| Score | Criteria |
+|-------|----------|
+| 8-10  | MACD golden cross + RSI 40-60 recovering + price above MA20 & MA50 + ADX>25 + volume confirmation |
+| 6-7   | 2-3 bullish signals aligned (e.g., RSI<40 turning up + MACD histogram improving + above MA20) |
+| 5     | Mixed signals — some bullish, some bearish, no clear direction |
+| 3-4   | Mostly bearish — below key MAs, RSI declining, MACD negative |
+| 0-2   | Strong bearish — RSI>70 diverging, MACD dead cross, below all MAs, high ADX downtrend |
+
+### Step 2: Fundamental Score (0-10)
+Evaluate ONLY from provided fundamental data. If a metric is missing, SKIP it (do not guess):
+| Score | Criteria |
+|-------|----------|
+| 8-10  | Forward PE < sector avg, revenue growth >15%, positive FCF, ROE>15%, low debt |
+| 6-7   | Reasonable valuation (PE<25), positive margins, manageable debt |
+| 5     | Fair value or insufficient data (score 5.0 if mostly missing) |
+| 3-4   | Expensive (PE>30) or declining margins or high debt |
+| 0-2   | Severely overvalued or deteriorating fundamentals |
+
+### Step 3: Sentiment Score (0-10)
+Evaluate ONLY from provided news items and their sentiment values:
+| Score | Criteria |
+|-------|----------|
+| 8-10  | Multiple recent positive catalysts (earnings beat, upgrade, product launch) |
+| 5     | No significant news OR mixed/neutral (default if no news provided) |
+| 0-2   | Severe negative catalyst (fraud, massive miss, sector collapse) |
+
+### Step 4: Market Regime Adjustment
+- VIX > 30: reduce confidence by 15-25%
+- VIX > 25: reduce confidence by 5-15%
+- SPY/QQQ both declining >1%: reduce confidence by 5-10%
+
+### Step 5: Earnings Proximity Check
+- Earnings within 7 days: cap confidence at 0.60
+- Earnings within 3 days: cap confidence at 0.40
+
+### Step 6: Derive Action
+Calculate weighted_score = (technical * 0.45) + (fundamental * 0.30) + (sentiment * 0.25)
+- STRONG_BUY: weighted_score >= 7.5 AND technical_score >= 7 AND confidence >= 0.80
+- BUY: weighted_score >= 6.0 AND technical_score >= 5 AND confidence >= 0.65
+- HOLD: below BUY thresholds
+IMPORTANT: If technical_score >= 7 but you output HOLD, you MUST explain why in reasoning.
+
+### Confidence Definition
+confidence = probability of positive return within 2-4 weeks:
+- 0.90+: All signals aligned, strong catalyst
+- 0.75-0.89: Most signals bullish, minor concerns
+- 0.60-0.74: Bullish lean but notable risks
+- 0.40-0.59: Mixed signals, uncertain
+- <0.40: Mostly bearish or insufficient data
+
+CRITICAL: Respond ONLY with valid JSON:
 {
     "action": "STRONG_BUY" | "BUY" | "HOLD",
     "confidence": <float 0.0-1.0>,
-    "target_price": <float or null>,
-    "stop_loss": <float or null>,
+    "target_price": <float — 2-4 week target within +3% to +15% of current price, or null>,
+    "stop_loss": <float — within -2% to -8% of current price, or null>,
     "technical_score": <float 0.0-10.0>,
-    // 0-2: Strong bearish (RSI>70, MACD dead cross, below all MAs)
-    // 3-4: Weak bearish / neutral-bearish
-    // 5: Neutral / mixed signals
-    // 6-7: Moderate bullish (RSI recovering, MACD positive, above MA20/50)
-    // 8-10: Strong bullish (golden cross, breakout confirmed with volume)
     "fundamental_score": <float 0.0-10.0>,
-    // 0-2: Overvalued (PE>40, negative margins, high debt)
-    // 3-4: Fairly valued with concerns
-    // 5: Fair value
-    // 6-7: Undervalued (PE<20, positive FCF, moderate growth)
-    // 8-10: Deeply undervalued with strong catalysts
     "sentiment_score": <float 0.0-10.0>,
-    // 0-2: Extremely negative news, analyst downgrades
-    // 5: Neutral / no significant news
-    // 8-10: Very positive catalysts, analyst upgrades
-    "reasoning": "<string, max 500 chars, in English>",
-    "key_factors": ["<factor1>", "<factor2>", ...],
-    "risks": ["<risk1>", "<risk2>", ...]
+    "weighted_score": <float 0.0-10.0>,
+    "reasoning": "<max 500 chars, MUST cite specific numbers from input data>",
+    "key_factors": ["<factor1>", "<factor2>", "<factor3>"],
+    "risks": ["<risk1>", "<risk2>"],
+    "entry_strategy": "MARKET" | "LIMIT_ON_DIP" | "SCALE_IN",
+    "time_horizon_days": <int 5-20>
 }
 
-Guidelines:
-- STRONG_BUY: confidence >= 0.80, clear bullish signals across multiple indicators
-- BUY: confidence >= 0.65, moderate bullish signals
-- HOLD: insufficient bullish evidence or mixed signals
-- reasoning must be in English for consistency
-- target_price and stop_loss should be realistic based on current price and volatility"""
+RULES:
+- NEVER reference data not provided in the input
+- If fundamental data is missing, fundamental_score MUST be 5.0
+- If no news provided, sentiment_score MUST be 5.0
+- reasoning MUST cite at least 2 specific numbers from input
+- All text in English"""
 
 
 class AIAnalyzer:
@@ -284,181 +326,212 @@ class AIAnalyzer:
         }
 
     def _build_prompt(self, context: dict) -> str:
-        """컨텍스트 데이터를 분석 프롬프트로 변환합니다."""
+        """Pre-compute derived metrics and present as narrative summary."""
         stock = context.get("stock", {})
         prices = context.get("prices", [])
         ind = context.get("indicators", {})
         news = context.get("news", [])
         current_price = context.get("current_price")
+        fundamentals = context.get("fundamentals", {})
 
         prompt_parts = [
-            f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M')} ET",
-            "",
-            f"## Stock: {stock.get('ticker')} - {stock.get('name')}",
+            f"## {stock.get('ticker')} — {stock.get('name')}",
             f"Sector: {stock.get('sector')} | Industry: {stock.get('industry')}",
             f"Market Cap: ${stock.get('market_cap', 0):,.0f}" if stock.get("market_cap") else "Market Cap: N/A",
-            f"Current Price: ${current_price}" if current_price else "",
-            "",
-            "## Recent 35-Day Price Data (OHLCV):",
-            json.dumps(prices, separators=(',', ':')),
-            "",
-            "## Latest Technical Indicators:",
-            json.dumps(ind, indent=2),
+            f"Current Price: ${current_price:.2f}" if current_price else "",
+            f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M')} ET",
             "",
         ]
 
-        # Short Interest & Ownership
-        short_ratio = stock.get("short_ratio")
-        short_pct = stock.get("short_pct_of_float")
-        inst_pct = context.get("fundamentals", {}).get("held_pct_institutions")
-        insider_pct = context.get("fundamentals", {}).get("held_pct_insiders")
+        # === PRICE ACTION SUMMARY ===
+        if prices and len(prices) >= 5:
+            latest = prices[-1]
+            p5 = prices[-5] if len(prices) >= 5 else prices[0]
+            p10 = prices[-10] if len(prices) >= 10 else prices[0]
+            p20 = prices[-20] if len(prices) >= 20 else prices[0]
 
-        ownership_lines = []
-        if short_ratio is not None:
-            ownership_lines.append(f"- Short Ratio: {short_ratio:.1f} days to cover")
-        if short_pct is not None:
-            ownership_lines.append(f"- Short % of Float: {short_pct:.1%}")
-        if inst_pct is not None:
-            ownership_lines.append(f"- Institutional Ownership: {inst_pct:.1%}")
-        if insider_pct is not None:
-            ownership_lines.append(f"- Insider Ownership: {insider_pct:.1%}")
-        if ownership_lines:
-            prompt_parts.extend(["## Ownership & Short Interest:"] + ownership_lines + [""])
+            ret_5d = ((latest["close"] - p5["close"]) / p5["close"]) * 100 if p5["close"] else 0
+            ret_10d = ((latest["close"] - p10["close"]) / p10["close"]) * 100 if p10["close"] else 0
+            ret_20d = ((latest["close"] - p20["close"]) / p20["close"]) * 100 if p20["close"] else 0
 
-        # 재무 데이터 (Fundamental Data)
-        fundamentals = context.get("fundamentals", {})
-        if fundamentals:
-            fund_lines = ["## Fundamental Data:"]
-            fund_labels = {
-                "pe_ratio": "P/E (trailing)",
-                "forward_pe": "P/E (forward)",
-                "pb_ratio": "P/B",
-                "ps_ratio": "P/S",
-                "dividend_yield": "Dividend Yield",
-                "eps_trailing": "EPS (trailing)",
-                "eps_forward": "EPS (forward)",
-                "revenue_growth": "Revenue Growth",
-                "profit_margin": "Profit Margin",
-                "debt_to_equity": "Debt/Equity",
-                "roe": "ROE",
-                "free_cash_flow": "Free Cash Flow",
-            }
-            for key, label in fund_labels.items():
-                val = fundamentals.get(key)
-                if val is not None:
-                    if key in ("dividend_yield", "revenue_growth", "profit_margin", "roe"):
-                        fund_lines.append(f"- {label}: {val:.2%}" if isinstance(val, (int, float)) else f"- {label}: {val}")
-                    elif key == "free_cash_flow":
-                        fund_lines.append(f"- {label}: ${val:,.0f}" if isinstance(val, (int, float)) else f"- {label}: {val}")
-                    else:
-                        fund_lines.append(f"- {label}: {val}")
-            prompt_parts.extend(fund_lines + [""])
+            high_35d = max(p["high"] for p in prices)
+            low_35d = min(p["low"] for p in prices)
+            pct_from_high = ((latest["close"] - high_35d) / high_35d) * 100 if high_35d else 0
+            pct_from_low = ((latest["close"] - low_35d) / low_35d) * 100 if low_35d else 0
 
+            recent_5d_vol = sum(p["volume"] for p in prices[-5:]) / 5
+            prior_5d_vol = sum(p["volume"] for p in prices[-10:-5]) / 5 if len(prices) >= 10 else recent_5d_vol
+            vol_change = ((recent_5d_vol - prior_5d_vol) / prior_5d_vol * 100) if prior_5d_vol > 0 else 0
+
+            last3 = prices[-3:]
+            candle_desc = []
+            for p in last3:
+                direction = "+" if p["close"] >= p["open"] else "-"
+                body_pct = abs(p["close"] - p["open"]) / p["open"] * 100 if p["open"] else 0
+                candle_desc.append(f"{p['date']}: {direction}{body_pct:.1f}% C:{p['close']:.2f} V:{p['volume']:,}")
+
+            prompt_parts.extend([
+                "## Price Action:",
+                f"- Returns: 5d={ret_5d:+.2f}% | 10d={ret_10d:+.2f}% | 20d={ret_20d:+.2f}%",
+                f"- 35d range: High=${high_35d:.2f} ({pct_from_high:+.1f}%) | Low=${low_35d:.2f} ({pct_from_low:+.1f}%)",
+                f"- Volume trend: 5d avg={recent_5d_vol:,.0f} ({vol_change:+.1f}% vs prior 5d)",
+                "- Last 3 sessions: " + " | ".join(candle_desc),
+                "",
+            ])
+
+        # === TECHNICAL INDICATORS ===
         if ind:
-            # 기술적 신호 요약
             rsi = ind.get("rsi_14")
             macd_hist = ind.get("macd_hist")
             macd_crossover = ind.get("macd_crossover")
+            prev_macd_hist = ind.get("prev_macd_hist")
+            adx = ind.get("adx_14")
+            atr = ind.get("atr_14")
             bb_upper = ind.get("bb_upper")
             bb_lower = ind.get("bb_lower")
+            bb_middle = ind.get("bb_middle")
             ma_20 = ind.get("ma_20")
             ma_50 = ind.get("ma_50")
+            ma_200 = ind.get("ma_200")
+            vol_ma_20 = ind.get("volume_ma_20")
 
-            signals = []
+            tech_lines = [f"## Technical Indicators ({ind.get('date', 'N/A')}):"]
+
             if rsi is not None:
-                if rsi < 30:
-                    signals.append(f"RSI={rsi:.1f} (below 30 threshold)")
-                elif rsi > 70:
-                    signals.append(f"RSI={rsi:.1f} (above 70 threshold)")
-                else:
-                    signals.append(f"RSI={rsi:.1f} (neutral)")
-            # MACD: 방향 전환 우선 표시 [E]
-            if macd_crossover == "GOLDEN_CROSS":
-                signals.append(f"MACD Histogram: crossed from negative to positive ({macd_hist:.4f})")
-            elif macd_crossover == "DEAD_CROSS":
-                signals.append(f"MACD Histogram: crossed from positive to negative ({macd_hist:.4f})")
-            elif macd_hist is not None:
-                signals.append(f"MACD Histogram={'positive' if macd_hist > 0 else 'negative'} ({macd_hist:.4f})")
-            if current_price and bb_upper and bb_lower:
-                bb_pct = (current_price - bb_lower) / (bb_upper - bb_lower) * 100 if (bb_upper - bb_lower) != 0 else 50
-                signals.append(f"Bollinger Band position: {bb_pct:.1f}% (0%=lower, 100%=upper)")
+                rsi_label = "OVERSOLD" if rsi < 30 else ("OVERBOUGHT" if rsi > 70 else "NEUTRAL")
+                tech_lines.append(f"- RSI(14): {rsi:.1f} [{rsi_label}]")
+
+            if macd_hist is not None:
+                direction = ""
+                if macd_crossover == "GOLDEN_CROSS":
+                    direction = " ** CROSSED POSITIVE **"
+                elif macd_crossover == "DEAD_CROSS":
+                    direction = " ** CROSSED NEGATIVE **"
+                elif prev_macd_hist is not None:
+                    direction = " (improving)" if macd_hist > prev_macd_hist else " (deteriorating)"
+                tech_lines.append(f"- MACD Hist: {macd_hist:.4f}{direction}")
+
+            if current_price and bb_upper and bb_lower and (bb_upper - bb_lower) > 0:
+                bb_pct = (current_price - bb_lower) / (bb_upper - bb_lower) * 100
+                bb_label = "UPPER ZONE" if bb_pct > 80 else ("LOWER ZONE" if bb_pct < 20 else "MIDDLE")
+                tech_lines.append(f"- BB Position: {bb_pct:.1f}% [{bb_label}] (L:${bb_lower:.2f} M:${bb_middle:.2f} U:${bb_upper:.2f})")
+
+            ma_parts = []
             if current_price and ma_20:
-                pct_from_ma20 = (current_price - ma_20) / ma_20 * 100
-                signals.append(f"Price vs MA20: {pct_from_ma20:+.2f}%")
+                ma_parts.append(f"MA20:${ma_20:.2f}({(current_price-ma_20)/ma_20*100:+.1f}%)")
             if current_price and ma_50:
-                pct_from_ma50 = (current_price - ma_50) / ma_50 * 100
-                signals.append(f"Price vs MA50: {pct_from_ma50:+.2f}%")
+                ma_parts.append(f"MA50:${ma_50:.2f}({(current_price-ma_50)/ma_50*100:+.1f}%)")
+            if current_price and ma_200:
+                ma_parts.append(f"MA200:${ma_200:.2f}({(current_price-ma_200)/ma_200*100:+.1f}%)")
+            if ma_parts:
+                alignment = "BULLISH" if (ma_20 and ma_50 and ma_200 and ma_20 > ma_50 > ma_200) else \
+                            "BEARISH" if (ma_20 and ma_50 and ma_200 and ma_20 < ma_50 < ma_200) else "MIXED"
+                tech_lines.append(f"- MAs [{alignment}]: " + " | ".join(ma_parts))
 
-            adx = ind.get("adx_14")
             if adx is not None:
-                if adx > 25:
-                    signals.append(f"ADX={adx:.1f} (strong trend)")
-                elif adx > 20:
-                    signals.append(f"ADX={adx:.1f} (developing trend)")
-                else:
-                    signals.append(f"ADX={adx:.1f} (weak/no trend, range-bound)")
+                adx_label = "STRONG TREND" if adx > 25 else ("DEVELOPING" if adx > 20 else "RANGE-BOUND")
+                tech_lines.append(f"- ADX(14): {adx:.1f} [{adx_label}]")
 
-            if signals:
-                prompt_parts.extend(["## Technical Signal Summary:", *[f"- {s}" for s in signals], ""])
+            if atr is not None and current_price:
+                tech_lines.append(f"- ATR(14): ${atr:.2f} ({atr/current_price*100:.2f}% daily volatility)")
 
-        # 시장 국면 [G]
+            if vol_ma_20 and prices:
+                latest_vol = prices[-1]["volume"]
+                vol_ratio = latest_vol / vol_ma_20 if vol_ma_20 > 0 else 1
+                vol_label = "ABOVE AVG" if vol_ratio > 1.2 else ("BELOW AVG" if vol_ratio < 0.8 else "NORMAL")
+                tech_lines.append(f"- Volume: {latest_vol:,.0f} vs 20d-MA:{vol_ma_20:,.0f} ({vol_ratio:.2f}x [{vol_label}])")
+
+            prompt_parts.extend(tech_lines + [""])
+
+        # === FUNDAMENTALS (compact) ===
+        if fundamentals:
+            fund_items = []
+            pe = fundamentals.get("pe_ratio")
+            if pe is not None:
+                fund_items.append(f"P/E:{pe:.1f}")
+            fwd_pe = fundamentals.get("forward_pe")
+            if fwd_pe is not None:
+                fund_items.append(f"FwdPE:{fwd_pe:.1f}")
+            for key, label in [("pb_ratio","P/B"),("eps_trailing","EPS"),("debt_to_equity","D/E")]:
+                val = fundamentals.get(key)
+                if val is not None:
+                    fund_items.append(f"{label}:{val:.2f}")
+            for key, label in [("revenue_growth","RevGr"),("profit_margin","Margin"),("roe","ROE"),("dividend_yield","DivY")]:
+                val = fundamentals.get(key)
+                if val is not None and isinstance(val, (int, float)):
+                    fund_items.append(f"{label}:{val:.1%}")
+            fcf = fundamentals.get("free_cash_flow")
+            if fcf is not None and isinstance(fcf, (int, float)):
+                fund_items.append(f"FCF:${fcf:,.0f}")
+
+            if fund_items:
+                prompt_parts.extend([f"## Fundamentals: " + " | ".join(fund_items), ""])
+            else:
+                prompt_parts.extend(["## Fundamentals: No data (score as 5.0)", ""])
+
+        # === OWNERSHIP ===
+        ownership_items = []
+        sr = stock.get("short_ratio")
+        sp = stock.get("short_pct_of_float")
+        ip = fundamentals.get("held_pct_institutions")
+        inp = fundamentals.get("held_pct_insiders")
+        if sr is not None:
+            ownership_items.append(f"ShortRatio:{sr:.1f}d")
+        if sp is not None:
+            ownership_items.append(f"ShortFloat:{sp:.1%}")
+        if ip is not None:
+            ownership_items.append(f"Inst:{ip:.1%}")
+        if inp is not None:
+            ownership_items.append(f"Insider:{inp:.1%}")
+        if ownership_items:
+            prompt_parts.extend([f"## Ownership: " + " | ".join(ownership_items), ""])
+
+        # === MARKET CONTEXT ===
         market_ctx = context.get("market_context", {})
         if market_ctx:
-            market_lines = ["## Market Context:"]
+            items = []
             spy = market_ctx.get("SPY")
             qqq = market_ctx.get("QQQ")
             vix = market_ctx.get("^VIX")
-            if spy:
-                trend = "bullish" if spy["change_pct"] > 0 else "bearish"
-                market_lines.append(f"- SPY: ${spy['price']:.2f} ({spy['change_pct']:+.2f}%) — {trend}")
-            if qqq:
-                trend = "bullish" if qqq["change_pct"] > 0 else "bearish"
-                market_lines.append(f"- QQQ: ${qqq['price']:.2f} ({qqq['change_pct']:+.2f}%) — {trend}")
-            if vix:
-                vix_level = "HIGH(fear)" if vix["price"] > 30 else ("ELEVATED(caution)" if vix["price"] > 20 else "LOW(stable)")
-                market_lines.append(f"- VIX: {vix['price']:.2f} ({vix_level})")
             tnx = market_ctx.get("^TNX")
-            if tnx:
-                rate_env = "high-rate environment" if tnx["price"] > 4.5 else ("moderate rates" if tnx["price"] > 3.0 else "low rates")
-                market_lines.append(f"- 10Y Treasury Yield: {tnx['price']:.2f}% ({rate_env})")
-            prompt_parts.extend(market_lines + [""])
+            if spy: items.append(f"SPY:{spy['change_pct']:+.2f}%")
+            if qqq: items.append(f"QQQ:{qqq['change_pct']:+.2f}%")
+            if vix:
+                vl = "FEAR" if vix["price"]>30 else ("CAUTION" if vix["price"]>20 else "CALM")
+                items.append(f"VIX:{vix['price']:.1f}[{vl}]")
+            if tnx: items.append(f"10Y:{tnx['price']:.2f}%")
+            regime = "RISK-OFF" if (vix and vix["price"]>25) else \
+                     "BULLISH" if (spy and spy["change_pct"]>0.5) else \
+                     "BEARISH" if (spy and spy["change_pct"]<-0.5) else "NEUTRAL"
+            prompt_parts.extend([f"## Market [{regime}]: " + " | ".join(items), ""])
 
-        # 실적발표일 경고 [K]
-        earnings_warning = context.get("earnings_warning")
-        if earnings_warning:
-            prompt_parts.extend([f"## Earnings Alert: {earnings_warning}", ""])
+        # === EARNINGS ===
+        ew = context.get("earnings_warning")
+        if ew:
+            prompt_parts.extend([f"## EARNINGS ALERT: {ew}", ""])
 
-        # 백테스팅 과거 성과 [C]
-        past_perf = context.get("past_performance", {})
-        overall = past_perf.get("overall", {})
-        if overall.get("with_outcomes", 0) and overall["with_outcomes"] > 0:
-            perf_lines = [
-                "## AI Past Performance (last 90 days):",
-                f"- Recommendations with outcomes: {overall['with_outcomes']}",
-            ]
-            if overall.get("win_rate") is not None:
-                perf_lines.append(f"- Win rate: {overall['win_rate']:.1f}%")
-            if overall.get("avg_return") is not None:
-                perf_lines.append(f"- Avg return: {overall['avg_return']:.2f}%")
-            if past_perf.get("by_action"):
-                perf_lines.append("- By action:")
-                for ab in past_perf["by_action"]:
-                    perf_lines.append(
-                        f"  - {ab['action']}: win_rate={ab['win_rate']:.1f}%, avg_return={ab['avg_return']:.2f}%"
-                    )
-            prompt_parts.extend(perf_lines + [""])
+        # === AI TRACK RECORD ===
+        pp = context.get("past_performance", {})
+        ov = pp.get("overall", {})
+        if ov.get("with_outcomes", 0) > 0:
+            parts = [f"Evaluated:{ov['with_outcomes']}"]
+            if ov.get("win_rate") is not None: parts.append(f"WinRate:{ov['win_rate']:.0f}%")
+            if ov.get("avg_return") is not None: parts.append(f"AvgRet:{ov['avg_return']:.1f}%")
+            prompt_parts.extend([f"## AI Track Record (90d): " + " | ".join(parts), ""])
 
+        # === NEWS ===
         if news:
-            prompt_parts.append("## Recent News (sentiment: -1.0 negative to +1.0 positive):")
+            news_lines = ["## News:"]
             for n in news:
-                sentiment_str = f"sentiment={n['sentiment']}" if n["sentiment"] is not None else "sentiment=N/A"
-                prompt_parts.append(f"- [{n.get('published_at', 'N/A')}] {n['title']} ({sentiment_str})")
-            prompt_parts.append("")
+                sent = n.get("sentiment")
+                sl = " [+]" if sent and sent > 0.3 else (" [-]" if sent and sent < -0.3 else "")
+                title = n.get("title", "")
+                news_lines.append(f"- [{n.get('published_at','N/A')}]{sl} {title}")
+            prompt_parts.extend(news_lines + [""])
+        else:
+            prompt_parts.extend(["## News: None (sentiment_score should be 5.0)", ""])
 
-        prompt_parts.append(
-            "Based on all the above data, provide your buy recommendation as JSON."
-        )
-
+        prompt_parts.append("Analyze all data. Follow the decision framework. Compute weighted_score, then derive action. JSON only.")
         return "\n".join(prompt_parts)
 
     def _parse_response(self, text: str, current_price: float | None = None) -> dict:
@@ -496,6 +569,20 @@ class AIAnalyzer:
         data.setdefault("sentiment_score", None)
         data.setdefault("key_factors", [])
         data.setdefault("risks", [])
+        data.setdefault("weighted_score", None)
+        data.setdefault("entry_strategy", "MARKET")
+        data.setdefault("time_horizon_days", 14)
+
+        # weighted_score 일관성 검증
+        ws = data.get("weighted_score")
+        ts = data.get("technical_score")
+        fs = data.get("fundamental_score")
+        ss = data.get("sentiment_score")
+        if ws is not None and ts is not None and fs is not None and ss is not None:
+            expected_ws = ts * 0.45 + fs * 0.30 + ss * 0.25
+            if abs(ws - expected_ws) > 1.5:
+                logger.warning(f"weighted_score 불일치: {ws:.1f} vs 예상 {expected_ws:.1f}")
+                data["weighted_score"] = round(expected_ws, 2)
 
         # target_price / stop_loss 합리성 검증
         if current_price is not None and current_price > 0:
@@ -582,7 +669,7 @@ class AIAnalyzer:
                 if vix_level is not None and vix_level > 20:
                     import math
                     normalized = (vix_level - 20) / 15  # 0 at VIX=20, 1 at VIX=35
-                    vix_penalty = 0.3 * (1 / (1 + math.exp(-3 * (normalized - 0.5))))
+                    vix_penalty = 0.15 * (1 / (1 + math.exp(-3 * (normalized - 0.5))))
                     parsed["confidence"] = round(parsed["confidence"] * (1 - vix_penalty), 2)
 
             # 2. 신뢰도 임계값 체크 (VIX 조정 후 최종 게이트)
@@ -657,28 +744,46 @@ class AIAnalyzer:
 
     def get_priority_tickers(self, max_count: int = 50) -> list[str]:
         """
-        기술적 조건을 만족하는 상위 N개 종목을 선별합니다.
+        Multi-factor scoring: dual sub-model (momentum + mean-reversion)
+        with market regime-adaptive blending.
 
-        선별 기준 (점수 기반):
-          - RSI < 35: 과매도 (강력 매수 신호) → +3점
-          - RSI < 45: 저RSI (매수 고려) → +1점
-          - MACD Histogram > 0 (골든크로스 방향) → +2점
-          - 현재가 > MA20 (상승 추세) → +1점
-          - 현재가 > MA50 (중기 상승) → +1점
-          - 볼린저밴드 하단 근처 (BB pct < 25%) → +2점
-
-        DB에 저장된 TechnicalIndicator를 스캔하므로 API 호출 없음.
-        Gemini API 호출은 선별된 상위 max_count개에만 적용.
+        Scans all 818 tickers using DB-cached indicators (no API calls).
+        Selects top max_count for AI analysis.
         """
         from database.models import TechnicalIndicator, PriceHistory
         from datetime import timedelta
-
         from config.tickers import ALL_TICKERS
+
         watchlist = ALL_TICKERS
         scores: dict[str, float] = {}
 
-        cutoff_date = datetime.now() - timedelta(days=3)  # 최근 3일 이내 지표만 유효
+        cutoff_date = datetime.now() - timedelta(days=3)
 
+        # ── STEP 0: Market Regime Detection ──
+        regime_mom_w = 0.65  # default: 65% momentum, 35% reversion
+        regime_rev_w = 0.35
+        regime_name = "trending"
+
+        try:
+            from data_fetcher.market_data import market_fetcher as _mf
+            vix_data = _mf.fetch_realtime_price("^VIX")
+            vix_level = vix_data["price"] if vix_data else 18.0
+
+            if vix_level > 28:
+                regime_name = "high_volatility"
+                regime_mom_w, regime_rev_w = 0.25, 0.75
+            elif vix_level > 20:
+                regime_name = "transitional"
+                regime_mom_w, regime_rev_w = 0.45, 0.55
+            else:
+                regime_name = "trending"
+                regime_mom_w, regime_rev_w = 0.70, 0.30
+
+            logger.debug(f"[Scoring] Regime={regime_name} VIX={vix_level:.1f} mom={regime_mom_w:.0%} rev={regime_rev_w:.0%}")
+        except Exception as e:
+            logger.debug(f"[Scoring] Regime detection failed: {e}")
+
+        # ── STEP 1-5: Per-stock scoring ──
         with get_db() as db:
             for ticker in watchlist:
                 stock = db.query(Stock).filter(Stock.ticker == ticker).first()
@@ -697,102 +802,182 @@ class AIAnalyzer:
                 if ind is None:
                     continue
 
-                # 최신 종가 조회
-                latest_price_row = (
+                prev_ind = (
+                    db.query(TechnicalIndicator)
+                    .filter(
+                        TechnicalIndicator.stock_id == stock.id,
+                        TechnicalIndicator.date < ind.date,
+                    )
+                    .order_by(TechnicalIndicator.date.desc())
+                    .first()
+                )
+
+                price_rows = (
                     db.query(PriceHistory)
                     .filter(
                         PriceHistory.stock_id == stock.id,
                         PriceHistory.interval == "1d",
                     )
                     .order_by(PriceHistory.timestamp.desc())
-                    .first()
+                    .limit(6)
+                    .all()
                 )
-                current_price = latest_price_row.close if latest_price_row else None
+                if not price_rows:
+                    continue
 
-                score = 0.0
+                current_price = price_rows[0].close
+                latest_volume = price_rows[0].volume
 
-                # RSI 신호 (떨어지는 칼 방지: RSI<35이면서 MA200 아래이면 점수 추가 안 함)
-                below_ma200 = (current_price and ind.ma_200 and current_price < ind.ma_200)
-                if ind.rsi_14 is not None:
-                    if ind.rsi_14 < 35:
-                        if not below_ma200:
-                            score += 2.0
-                        else:
-                            logger.debug(f"[{ticker}] RSI={ind.rsi_14:.1f} < 35이지만 MA200 아래 → 점수 미부여 (떨어지는 칼 방지)")
-                    elif ind.rsi_14 < 45:
-                        score += 1.0
+                # ── MOMENTUM SUB-SCORE ──
+                momentum = 0.0
 
-                # MACD 방향 전환 스코어링 [E] (골든크로스 시 거래량 조건 추가)
-                if ind.macd_hist is not None and ind.macd_hist > 0:
-                    prev_ind_row = (
-                        db.query(TechnicalIndicator)
-                        .filter(
-                            TechnicalIndicator.stock_id == stock.id,
-                            TechnicalIndicator.date < ind.date,
-                        )
-                        .order_by(TechnicalIndicator.date.desc())
-                        .first()
-                    )
-                    if prev_ind_row and prev_ind_row.macd_hist is not None and prev_ind_row.macd_hist <= 0:
-                        # 골든크로스 발생: 거래량 >= VMA20이면 +3, 아니면 +1
-                        latest_volume = latest_price_row.volume if latest_price_row else None
-                        if latest_volume and ind.volume_ma_20 and latest_volume >= ind.volume_ma_20:
-                            score += 3.0  # 골든크로스 + 거래량 수반
-                        else:
-                            score += 1.0  # 골든크로스이지만 거래량 부족
-                    else:
-                        score += 2.0  # 양수 유지 (상승 모멘텀)
+                # M1: MA Alignment (0-4)
+                ma_count = 0
+                if current_price and ind.ma_20 and current_price > ind.ma_20: ma_count += 1
+                if current_price and ind.ma_50 and current_price > ind.ma_50: ma_count += 1
+                if current_price and ind.ma_200 and current_price > ind.ma_200: ma_count += 1
+                if ind.ma_20 and ind.ma_50 and ind.ma_200 and ind.ma_20 > ind.ma_50 > ind.ma_200:
+                    ma_count += 1  # Perfect stacking bonus
+                momentum += min(ma_count, 4)
 
-                # 이동평균 신호
-                if current_price and ind.ma_20 and current_price > ind.ma_20:
-                    score += 1.0
-                if current_price and ind.ma_50 and current_price > ind.ma_50:
-                    score += 1.0
+                # M2: MACD (0-3)
+                is_golden_cross = False
+                macd_pts = 0.0
+                if ind.macd_hist is not None:
+                    if (prev_ind and prev_ind.macd_hist is not None
+                            and prev_ind.macd_hist <= 0 and ind.macd_hist > 0):
+                        is_golden_cross = True
+                        macd_pts = 2.5
+                    elif ind.macd_hist > 0:
+                        macd_pts = 1.5
+                        if prev_ind and prev_ind.macd_hist is not None and ind.macd_hist > prev_ind.macd_hist:
+                            macd_pts = 2.0  # Accelerating
+                momentum += min(macd_pts, 3.0)
 
-                # MA200 장기 추세 스코어링 [F]
-                if current_price and ind.ma_200:
-                    if current_price > ind.ma_200:
-                        score += 2.0   # 장기 상승 추세
-                    else:
-                        score -= 1.0   # 장기 하락 추세 페널티
-
-                # ADX 추세 강도 보너스
+                # M3: ADX multiplier
+                adx_mult = 1.0
                 if ind.adx_14 is not None:
-                    if ind.adx_14 > 25:
-                        score += 2.0   # 강한 추세 진행 중
-                    elif ind.adx_14 > 20:
-                        score += 1.0   # 보통 추세
+                    if ind.adx_14 > 30: adx_mult = 1.3
+                    elif ind.adx_14 > 25: adx_mult = 1.15
+                    elif ind.adx_14 < 20: adx_mult = 0.7
+                momentum *= adx_mult
 
-                # RSI 모멘텀 존 (50-65) - 상승 추세 중 건전한 영역
+                # M4: RSI Momentum Zone (50-65 in uptrend)
                 if ind.rsi_14 is not None and 50 <= ind.rsi_14 <= 65:
-                    if current_price and ind.ma_50 and current_price > ind.ma_50:
-                        score += 2.0   # 상승 추세 + 건전한 RSI
+                    momentum += 1.5
 
-                # 볼린저밴드 하단 근처 — 거래량 조건부 스코어링 [H]
-                if (current_price and ind.bb_upper and ind.bb_lower and
-                        (ind.bb_upper - ind.bb_lower) > 0):
+                # ── MEAN-REVERSION SUB-SCORE ──
+                reversion = 0.0
+
+                # R1: RSI Oversold (0-3)
+                if ind.rsi_14 is not None:
+                    if ind.rsi_14 < 25: reversion += 3.0
+                    elif ind.rsi_14 < 30: reversion += 2.5
+                    elif ind.rsi_14 < 35: reversion += 1.5
+                    elif ind.rsi_14 < 40: reversion += 0.5
+
+                # R2: StochRSI oversold cross (0-2)
+                if ind.stoch_rsi_k is not None and ind.stoch_rsi_d is not None:
+                    if ind.stoch_rsi_k < 0.20 and ind.stoch_rsi_d < 0.20:
+                        reversion += 1.0
+                        if (prev_ind and prev_ind.stoch_rsi_k is not None
+                                and prev_ind.stoch_rsi_d is not None
+                                and prev_ind.stoch_rsi_k <= prev_ind.stoch_rsi_d
+                                and ind.stoch_rsi_k > ind.stoch_rsi_d):
+                            reversion += 1.0  # Bullish cross in oversold
+
+                # R3: BB Position (0-2.5)
+                if (current_price and ind.bb_upper and ind.bb_lower
+                        and (ind.bb_upper - ind.bb_lower) > 0):
                     bb_pct = (current_price - ind.bb_lower) / (ind.bb_upper - ind.bb_lower) * 100
-                    if bb_pct < 25:
-                        latest_volume = latest_price_row.volume if latest_price_row else None
-                        if latest_volume and ind.volume_ma_20 and latest_volume < ind.volume_ma_20:
-                            score += 1.0   # 거래량 감소: 하락 지속 가능
+                    if bb_pct < 10: reversion += 2.5
+                    elif bb_pct < 20: reversion += 2.0
+                    elif bb_pct < 30: reversion += 1.0
+
+                # R4: BB Squeeze (0-1.5)
+                if (ind.bb_upper and ind.bb_lower and ind.bb_middle and ind.bb_middle > 0
+                        and prev_ind and prev_ind.bb_upper and prev_ind.bb_lower
+                        and prev_ind.bb_middle and prev_ind.bb_middle > 0):
+                    bb_width = (ind.bb_upper - ind.bb_lower) / ind.bb_middle
+                    prev_width = (prev_ind.bb_upper - prev_ind.bb_lower) / prev_ind.bb_middle
+                    if bb_width < 0.04 and bb_width < prev_width:
+                        reversion += 1.5
+                    elif bb_width < 0.06:
+                        reversion += 0.5
+
+                # ── VOLUME MULTIPLIER ──
+                vol_mult = 1.0
+                if latest_volume and ind.volume_ma_20 and ind.volume_ma_20 > 0:
+                    vr = latest_volume / ind.volume_ma_20
+                    if vr > 2.0: vol_mult = 1.4
+                    elif vr > 1.3: vol_mult = 1.2
+                    elif vr < 0.5: vol_mult = 0.6
+                    elif vr < 0.8: vol_mult = 0.8
+
+                # ── OBV DIVERGENCE BONUS ──
+                obv_bonus = 0.0
+                if ind.obv is not None and prev_ind and prev_ind.obv is not None:
+                    obv_chg = ind.obv - prev_ind.obv
+                    price_chg = price_rows[0].close - price_rows[1].close if len(price_rows) >= 2 else 0
+                    if obv_chg > 0 and price_chg <= 0:
+                        obv_bonus = 1.5  # Bullish divergence
+                    elif obv_chg > 0 and price_chg > 0:
+                        obv_bonus = 0.5
+
+                # ── PENALTIES ──
+
+                # P1: Falling knife
+                knife_pen = 0.0
+                if len(price_rows) >= 4:
+                    down_days = 0
+                    for i in range(min(len(price_rows) - 1, 4)):
+                        if price_rows[i].close < price_rows[i + 1].close:
+                            down_days += 1
                         else:
-                            score += 2.0   # 거래량 정상/증가: 반등 신호 유효
+                            break
+                    if down_days >= 4: knife_pen = 0.4
+                    elif down_days >= 3: knife_pen = 0.25
 
-                if score > 0:
-                    scores[ticker] = score
+                # Below MA200 = reduce reversion score
+                if current_price and ind.ma_200 and current_price < ind.ma_200:
+                    reversion *= 0.5
 
-        # 점수 내림차순 정렬, 상위 max_count개 선택
+                # P2: Bull trap for golden cross
+                if is_golden_cross:
+                    trap = 0.0
+                    if latest_volume and ind.volume_ma_20 and latest_volume < ind.volume_ma_20 * 0.8:
+                        trap += 0.2
+                    if (current_price and ind.ma_20 and ind.ma_50
+                            and current_price < ind.ma_20 and current_price < ind.ma_50):
+                        trap += 0.3
+                    if trap > 0:
+                        momentum -= macd_pts * min(trap, 0.5)
+                        momentum = max(momentum, 0)
+
+                # P3: Overbought guard
+                if ind.rsi_14 is not None and ind.rsi_14 > 75:
+                    momentum *= 0.3
+                    reversion = 0
+
+                # ── FINAL SCORE ──
+                raw = regime_mom_w * momentum + regime_rev_w * reversion
+                adjusted = raw * vol_mult + obv_bonus
+                final = adjusted * (1.0 - knife_pen)
+                final = max(final, 0.0)
+
+                if final > 0.5:
+                    scores[ticker] = round(final, 2)
+
         sorted_tickers = sorted(scores, key=lambda t: scores[t], reverse=True)
         selected = sorted_tickers[:max_count]
 
         logger.info(
-            f"[AI 우선순위] 전체 {len(watchlist)}개 중 지표 데이터 있는 종목: {len(scores)}개, "
-            f"상위 {len(selected)}개 선별 완료"
+            f"[AI Priority] Regime={regime_name} | Scanned {len(watchlist)}, "
+            f"scored {len(scores)}, selected top {len(selected)}"
         )
         if selected:
-            top5 = [(t, f"{scores[t]:.1f}점") for t in selected[:5]]
-            logger.debug(f"[AI 우선순위] 상위 5개: {top5}")
+            top5 = [(t, f"{scores[t]:.2f}") for t in selected[:5]]
+            logger.debug(f"[AI Priority] Top 5: {top5}")
 
         return selected
 
