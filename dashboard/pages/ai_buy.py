@@ -85,7 +85,7 @@ def render():
             st.caption(f"마지막 분석: {recs[0].get('recommendation_date', 'N/A')}")
 
     if run_analysis:
-        with st.spinner("AI 분석 중... (우선순위 종목 선별 후 분석, 1~3분 소요)"):
+        with st.spinner("전 종목 AI 분석 중... (API 제한을 피하기 위해 종목당 5초 대기, 최대 5분 이상 소요될 수 있습니다)"):
             try:
                 ai_analyzer.analyze_all_watchlist()
                 st.cache_data.clear()

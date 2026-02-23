@@ -982,19 +982,19 @@ class AIAnalyzer:
 
     def analyze_all_watchlist(self) -> dict[str, str]:
         """
-        watchlist 전체를 기술적 필터링 후 상위 50개 종목만 AI 분석합니다.
-        전체 종목이 많을 경우(>50개) get_priority_tickers()로 우선순위 선별.
+        watchlist 전체를 기술적 필터링 후 상위 50개 종목을 AI 분석합니다.
+        무료 티어 API 제한(RPM 15) 우회를 위해 5초의 대기 시간을 갖고, 
+        429 Quota 에러 시 60초 대기 후 재시도하는 로직(Backoff)을 포함합니다.
 
         Returns:
             {ticker: action} 딕셔너리
         """
         results = {}
         # 매수 분석은 전체 유니버스(ALL_TICKERS)에서 후보를 찾음
-        # (보유 종목만 분석하면 새 매수 기회를 놓침)
         from config.tickers import ALL_TICKERS
         all_tickers = ALL_TICKERS
 
-        # 50개 초과 시 우선순위 필터 적용
+        # 50개 초과 시 우선순위 필터 적용 (이 이상은 현실적으로 너무 오래 걸림)
         if len(all_tickers) > 50:
             tickers = self.get_priority_tickers(max_count=50)
             if not tickers:
@@ -1006,19 +1006,46 @@ class AIAnalyzer:
             logger.info(f"[AI 분석] 전체 종목 분석 시작: {tickers}")
 
         import time
+        from google.api_core.exceptions import ResourceExhausted
+
         for i, ticker in enumerate(tickers):
-            try:
-                rec = self.analyze_ticker(ticker)
-                results[ticker] = rec.action if rec else "ERROR"
-            except Exception as e:
-                logger.error(f"[{ticker}] 분석 중 예외 발생: {e}")
-                results[ticker] = "ERROR"
-            # Rate limit: API 호출 간 2초 대기
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"[AI 분석] ({i+1}/{len(tickers)}) {ticker} 시도 중...")
+                    rec = self.analyze_ticker(ticker)
+                    results[ticker] = rec.action if rec else "ERROR"
+                    break # 성공 시 재시도 루프 탈출
+
+                except ResourceExhausted as e:
+                    # 429 오류 명시적 캡처 (Quota Exceeded)
+                    if attempt < max_retries - 1:
+                        logger.warning(f"[{ticker}] API 할당량 초과(429). 60초 대기 후 재시도... ({attempt+1}/{max_retries})")
+                        time.sleep(60) # 60초 대기하며 쿼터 리셋 기다림
+                    else:
+                        logger.error(f"[{ticker}] 최대 재시도(3회) 실패(429 Error). 다음 종목으로 넘어갑니다: {e}")
+                        results[ticker] = "ERROR"
+
+                except Exception as e:
+                    # 기타 치명적 에러 시 재시도하지 않고 넘어감
+                    if '429' in str(e):
+                        if attempt < max_retries - 1:
+                            logger.warning(f"[{ticker}] API 할당량 초과(429 str). 60초 대기 후 재시도... ({attempt+1}/{max_retries})")
+                            time.sleep(60)
+                        else:
+                            logger.error(f"[{ticker}] 최대 재시도 실패(429 Error): {e}")
+                            results[ticker] = "ERROR"
+                    else:
+                        logger.error(f"[{ticker}] 분석 중 예외 발생: {e}")
+                        results[ticker] = "ERROR"
+                        break
+
+            # Rate limit: 평상시 호출 딜레이 (분당 최대 13건 이하 통제)
             if i < len(tickers) - 1:
-                time.sleep(2)
+                time.sleep(4.5)
 
         buy_count = sum(1 for a in results.values() if a in ("BUY", "STRONG_BUY"))
-        logger.info(f"[AI 분석] 완료 — 매수 추천: {buy_count}/{len(tickers)}개")
+        logger.info(f"[AI 분석] 구동 완료 — 매수 추천: {buy_count}/{len(tickers)}개 분석 완료")
         return results
 
     def get_todays_recommendations(self) -> list[dict]:
