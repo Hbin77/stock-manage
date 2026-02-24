@@ -14,6 +14,8 @@ import plotly.express as px
 from analysis.ai_analyzer import ai_analyzer
 from analysis.backtester import backtester
 from config.settings import settings
+from database.connection import get_db
+from database.models import Stock
 
 try:
     from config.tickers import TICKER_INDEX
@@ -66,8 +68,61 @@ def _get_monthly_perf(months: int):
     return backtester.get_monthly_performance(months=months)
 
 
+@st.cache_data(ttl=60)
+def _get_top_picks():
+    return ai_analyzer.get_top_picks(top_n=3)
+
+
 def render():
     st.header("🤖 AI 매수 추천")
+
+    # ── Top 3 최종 추천 ─────────────────────────────────────────────────────
+    top_picks = _get_top_picks()
+    if top_picks:
+        st.subheader("Top 3 최종 추천")
+        medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
+        cols = st.columns(3)
+        for i, pick in enumerate(top_picks):
+            with cols[i]:
+                medal = medal_map.get(pick["rank"], "")
+                st.markdown(f"### {medal} #{pick['rank']} {pick['ticker']}")
+                st.caption(pick["name"])
+
+                # 상승률 계산
+                upside_pct = 0.0
+                if pick.get("target_price") and pick.get("price_at_recommendation") and pick["price_at_recommendation"] > 0:
+                    upside_pct = (pick["target_price"] - pick["price_at_recommendation"]) / pick["price_at_recommendation"] * 100
+
+                st.metric("종합점수", f"{pick['composite_score']:.2f}")
+                st.metric("신뢰도", f"{int(pick['confidence'] * 100)}%")
+                st.metric(
+                    "현재가 → 목표가",
+                    f"${pick.get('target_price', 0):.2f}" if pick.get("target_price") else "N/A",
+                    delta=f"+{upside_pct:.1f}%" if upside_pct > 0 else None,
+                )
+                st.metric("손절가", f"${pick['stop_loss']:.2f}" if pick.get("stop_loss") else "N/A")
+                st.metric("R/R 비율", f"{pick['risk_reward_ratio']:.2f}")
+
+                # 기술/펀더멘탈/심리 점수 progress bar
+                st.markdown("**기술점수**")
+                st.progress(min(pick["technical_score"] / 10.0, 1.0))
+                st.caption(f"{pick['technical_score']:.1f}/10")
+
+                st.markdown("**펀더멘탈**")
+                st.progress(min(pick["fundamental_score"] / 10.0, 1.0))
+                st.caption(f"{pick['fundamental_score']:.1f}/10")
+
+                st.markdown("**심리점수**")
+                st.progress(min(pick["sentiment_score"] / 10.0, 1.0))
+                st.caption(f"{pick['sentiment_score']:.1f}/10")
+
+                # 간략 reasoning (150자)
+                reasoning_short = pick.get("reasoning", "")[:150]
+                if len(pick.get("reasoning", "")) > 150:
+                    reasoning_short += "..."
+                st.markdown(f"_{reasoning_short}_")
+
+        st.divider()
 
     # ── 오늘의 추천 ──────────────────────────────────────────────────────────
     st.subheader("오늘의 추천")
@@ -85,7 +140,7 @@ def render():
             st.caption(f"마지막 분석: {recs[0].get('recommendation_date', 'N/A')}")
 
     if run_analysis:
-        with st.spinner("전 종목 AI 분석 중... (API 제한을 피하기 위해 종목당 5초 대기, 최대 5분 이상 소요될 수 있습니다)"):
+        with st.spinner("전 종목 AI 분석 중... (병렬 5개 동시 분석, 약 1-2분 소요)"):
             try:
                 ai_analyzer.analyze_all_watchlist()
                 st.cache_data.clear()
@@ -99,12 +154,12 @@ def render():
     else:
         # ── 인덱스 그룹 필터 탭 ──────────────────────────────────────────────
         if _HAS_TICKER_INDEX:
-            tab_all, tab_nasdaq, tab_sp500, tab_etf, tab_midcap, tab_smallcap = st.tabs(
-                ["전체", "NASDAQ100", "S&P500", "ETF", "MIDCAP", "SMALLCAP"]
+            tab_all, tab_nasdaq, tab_sp500, tab_midcap, tab_smallcap = st.tabs(
+                ["전체", "NASDAQ100", "S&P500", "MIDCAP", "SMALLCAP"]
             )
         else:
             tab_all = st.container()
-            tab_nasdaq = tab_sp500 = tab_etf = tab_midcap = tab_smallcap = None
+            tab_nasdaq = tab_sp500 = tab_midcap = tab_smallcap = None
 
         def _render_recs(filtered_recs: list[dict]):
             buy_recs = [r for r in filtered_recs if r["action"] in ("BUY", "STRONG_BUY")]
@@ -121,14 +176,21 @@ def render():
                 confidence_pct = int(r["confidence"] * 100)
                 badges = _get_index_badges(r["ticker"])
 
+                # weighted_score 계산
+                ts = r.get("technical_score") or 0.0
+                fs = r.get("fundamental_score") or 0.0
+                ss = r.get("sentiment_score") or 0.0
+                w_score = ts * 0.45 + fs * 0.30 + ss * 0.25
+
                 with st.expander(
                     f"{action_icon} **{r['ticker']}** — {r['action']} ({confidence_pct}%)  {badges}",
                     expanded=True,
                 ):
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2, c3, c0 = st.columns(4)
                     c1.metric("현재가", f"${r['price_at_recommendation']:.2f}" if r.get("price_at_recommendation") else "N/A")
                     c2.metric("목표가", f"${r['target_price']:.2f}" if r.get("target_price") else "N/A")
                     c3.metric("손절가", f"${r['stop_loss']:.2f}" if r.get("stop_loss") else "N/A")
+                    c0.metric("가중점수", f"{w_score:.2f}/10")
 
                     c4, c5, c6 = st.columns(3)
                     c4.metric("기술점수", f"{r['technical_score']:.1f}/10" if r.get("technical_score") else "N/A")
@@ -146,6 +208,7 @@ def render():
                         st.markdown(f"- **{r['ticker']}** {badges} ({int(r['confidence']*100)}%) — {r['reasoning'][:80]}...")
 
         with tab_all:
+            st.caption("개별 주식만 분석됩니다 (ETF 제외)")
             _render_recs(recs)
 
         if _HAS_TICKER_INDEX and tab_nasdaq and tab_sp500:
@@ -163,14 +226,6 @@ def render():
                 else:
                     st.info("S&P500 종목 추천 없음")
 
-        if _HAS_TICKER_INDEX and tab_etf:
-            with tab_etf:
-                etf_recs = [r for r in recs if "ETF" in TICKER_INDEX.get(r["ticker"], [])]
-                if etf_recs:
-                    _render_recs(etf_recs)
-                else:
-                    st.info("ETF 추천 없음")
-
         if _HAS_TICKER_INDEX and tab_midcap:
             with tab_midcap:
                 midcap_recs = [r for r in recs if "MIDCAP" in TICKER_INDEX.get(r["ticker"], [])]
@@ -186,6 +241,34 @@ def render():
                     _render_recs(smallcap_recs)
                 else:
                     st.info("SmallCap 추천 없음")
+
+        # ── 섹터 분포 ──────────────────────────────────────────────────────────
+        tickers_in_recs = [r["ticker"] for r in recs]
+        if tickers_in_recs:
+            with get_db() as db:
+                stocks = db.query(Stock.ticker, Stock.sector).filter(Stock.ticker.in_(tickers_in_recs)).all()
+                sector_map = {s.ticker: (s.sector or "Unknown") for s in stocks}
+
+            sector_counts: dict[str, int] = {}
+            for t in tickers_in_recs:
+                sec = sector_map.get(t, "Unknown")
+                sector_counts[sec] = sector_counts.get(sec, 0) + 1
+
+            if sector_counts:
+                st.subheader("섹터 분포")
+                sec_df = pd.DataFrame(
+                    [{"섹터": k, "종목수": v} for k, v in sorted(sector_counts.items(), key=lambda x: -x[1])]
+                )
+                fig_sec = px.pie(
+                    sec_df, names="섹터", values="종목수",
+                    template="plotly_dark",
+                    hole=0.4,
+                )
+                fig_sec.update_layout(
+                    margin=dict(t=20, b=20, l=20, r=20),
+                    height=350,
+                )
+                st.plotly_chart(fig_sec, use_container_width=True)
 
     st.divider()
 

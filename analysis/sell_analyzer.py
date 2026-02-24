@@ -15,26 +15,65 @@ from database.models import AIRecommendation, MarketNews, PriceHistory, SellSign
 from portfolio.portfolio_manager import portfolio_manager
 
 SELL_SYSTEM_PROMPT = """You are an expert portfolio risk manager specializing in exit strategy optimization.
-Analyze the provided holding data and generate a sell signal recommendation.
+Analyze the provided holding data using the 3-pillar scoring framework below.
 
-CRITICAL: Respond ONLY with valid JSON matching this exact schema:
+## SCORING FRAMEWORK
+
+### Pillar 1: Technical Deterioration Score (0-10, weight 0.45)
+| Score | Criteria |
+|-------|----------|
+| 8-10  | RSI>75 + MACD dead cross + price below MA20 & MA50 + high volume selling |
+| 6-7   | 2-3 bearish signals (e.g., RSI>70, MACD histogram declining, below MA20) |
+| 5     | Mixed signals — some bearish, some bullish |
+| 3-4   | Mostly bullish — above MAs, RSI healthy, MACD positive |
+| 0-2   | Strong uptrend — all signals aligned bullish |
+
+### Pillar 2: Position Risk Score (0-10, weight 0.35)
+| Score | Criteria |
+|-------|----------|
+| 8-10  | Loss > -10% OR drawdown from high > 15% OR stop-loss breached |
+| 6-7   | Loss -5% to -10% OR drawdown 10-15% from high |
+| 5     | Breakeven or small gain/loss (<5%) |
+| 3-4   | Moderate gain (5-15%) with no trailing stop breach |
+| 0-2   | Large gain (>15%) with strong uptrend intact |
+
+### Pillar 3: Fundamental/Sentiment Score (0-10, weight 0.20)
+| Score | Criteria |
+|-------|----------|
+| 8-10  | Severe negative catalyst (earnings miss, downgrade, sector collapse) |
+| 5     | No significant news or mixed sentiment |
+| 0-2   | Strong positive catalyst supporting hold |
+
+### Derive sell_pressure
+sell_pressure = (technical_score * 0.45) + (position_risk_score * 0.35) + (fundamental_score * 0.20)
+- STRONG_SELL: sell_pressure >= 7.0
+- SELL: sell_pressure >= 5.5
+- HOLD: sell_pressure < 5.5
+
+### Urgency
+- HIGH: stop-loss breached, loss > -10%, or sell_pressure >= 8.0
+- NORMAL: sell_pressure 5.5-8.0
+- LOW: sell_pressure < 5.5
+
+CRITICAL: Respond ONLY with valid JSON:
 {
     "signal": "STRONG_SELL" | "SELL" | "HOLD",
     "urgency": "HIGH" | "NORMAL" | "LOW",
     "confidence": <float 0.0-1.0>,
+    "technical_score": <float 0.0-10.0>,
+    "position_risk_score": <float 0.0-10.0>,
+    "fundamental_score": <float 0.0-10.0>,
+    "sell_pressure": <float 0.0-10.0>,
     "suggested_sell_price": <float or null>,
-    "reasoning": "<string, max 500 chars, in English>",
-    "exit_strategy": "<string describing exit approach, in English>",
+    "reasoning": "<max 500 chars, cite specific numbers from input>",
+    "exit_strategy": "<string: IMMEDIATE | LIMIT_SELL | SCALE_OUT | HOLD_WITH_STOP>",
     "risk_factors": ["<risk1>", "<risk2>", ...]
 }
 
-Guidelines:
-- STRONG_SELL + HIGH urgency: immediate exit recommended (stop-loss breach, severe deterioration)
-- STRONG_SELL + NORMAL: sell within 1-2 days
-- SELL: consider selling within a week
-- HOLD: maintain position, no immediate action needed
-- Consider: current PnL %, holding period, RSI (>70 = overbought), MACD trend, Bollinger Band position
-- reasoning and exit_strategy must be in English"""
+RULES:
+- All text in English
+- reasoning MUST cite at least 2 specific numbers from input data
+- Compute sell_pressure from the 3 pillar scores, then derive signal"""
 
 
 # ── 헬퍼 함수 ─────────────────────────────────────────────────────────────────
@@ -70,35 +109,28 @@ class SellAnalyzer:
     """Google Gemini 기반 매도 신호 분석기"""
 
     def __init__(self):
-        self._model = None
+        self._client = None
 
-    def _get_model(self):
-        """Gemini 모델 지연 초기화 (캐싱)"""
-        if self._model is not None:
-            return self._model
+    def _get_client(self):
+        """Gemini 클라이언트 지연 초기화 (캐싱)"""
+        if self._client is not None:
+            return self._client
 
         if not settings.GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            self._model = genai.GenerativeModel(
-                model_name=settings.GEMINI_MODEL,
-                system_instruction=SELL_SYSTEM_PROMPT,
-                generation_config=genai.GenerationConfig(
-                    temperature=settings.AI_TEMPERATURE,
-                    max_output_tokens=settings.AI_MAX_TOKENS,
-                    response_mime_type="application/json",
-                ),
+            from google import genai
+            self._client = genai.Client(
+                api_key=settings.GEMINI_API_KEY,
             )
-            logger.debug(f"[매도 분석] Gemini 모델 초기화 완료: {settings.GEMINI_MODEL}")
+            logger.debug(f"[매도 분석] Gemini 클라이언트 초기화 완료: {settings.GEMINI_MODEL}")
         except ImportError:
             raise RuntimeError(
-                "google-generativeai 패키지가 설치되지 않았습니다. "
-                "pip install google-generativeai 로 설치하세요."
+                "google-genai 패키지가 설치되지 않았습니다. "
+                "pip install google-genai 로 설치하세요."
             )
-        return self._model
+        return self._client
 
     def _build_sell_context(self, ticker: str, holding_info: dict, db) -> dict:
         """보유 정보 + 기술적 지표 + 뉴스를 결합한 매도 분석 컨텍스트를 구성합니다."""
@@ -538,6 +570,27 @@ class SellAnalyzer:
         data.setdefault("suggested_sell_price", None)
         data.setdefault("exit_strategy", "")
         data.setdefault("risk_factors", [])
+        data.setdefault("technical_score", None)
+        data.setdefault("position_risk_score", None)
+        data.setdefault("fundamental_score", None)
+        data.setdefault("sell_pressure", None)
+
+        # score 필드 범위 검증 (0.0~10.0 클램핑)
+        for score_field in ["technical_score", "position_risk_score", "fundamental_score", "sell_pressure"]:
+            val = data.get(score_field)
+            if val is not None:
+                data[score_field] = max(0.0, min(10.0, float(val)))
+
+        # sell_pressure 일관성 검증
+        sp = data.get("sell_pressure")
+        ts = data.get("technical_score")
+        pr = data.get("position_risk_score")
+        fs = data.get("fundamental_score")
+        if sp is not None and ts is not None and pr is not None and fs is not None:
+            expected_sp = ts * 0.45 + pr * 0.35 + fs * 0.20
+            if abs(sp - expected_sp) > 1.5:
+                logger.warning(f"sell_pressure 불일치: {sp:.1f} vs 예상 {expected_sp:.1f}")
+                data["sell_pressure"] = round(expected_sp, 2)
 
         # suggested_sell_price 합리성 검증
         if current_price is not None and current_price > 0:
@@ -565,9 +618,9 @@ class SellAnalyzer:
         logger.info(f"[매도 분석] {ticker} 분석 시작 (PnL: {holding_info.get('unrealized_pnl_pct', 0):+.2f}%)")
 
         try:
-            model = self._get_model()
+            client = self._get_client()
         except RuntimeError as e:
-            logger.error(f"[매도 분석] 모델 초기화 실패: {e}")
+            logger.error(f"[매도 분석] 클라이언트 초기화 실패: {e}")
             return None
 
         with get_db() as db:
@@ -583,15 +636,30 @@ class SellAnalyzer:
             prompt = self._build_sell_prompt(context)
 
             try:
+                from google.genai import types
                 last_err = None
                 for attempt in range(3):
                     try:
-                        response = model.generate_content(prompt)
+                        response = client.models.generate_content(
+                            model=settings.GEMINI_MODEL,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=SELL_SYSTEM_PROMPT,
+                                temperature=settings.AI_TEMPERATURE,
+                                max_output_tokens=settings.AI_MAX_TOKENS,
+                                thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                                response_mime_type="application/json",
+                            ),
+                        )
                         break
                     except Exception as api_err:
                         last_err = api_err
                         if attempt < 2:
-                            wait_time = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                            import re as _re
+                            wait_time = settings.GEMINI_BACKOFF_BASE * (2 ** attempt)
+                            retry_match = _re.search(r"retry.*?(\d+)\.?\d*s", str(api_err), _re.IGNORECASE)
+                            if retry_match:
+                                wait_time = max(wait_time, int(retry_match.group(1)) + 1)
                             logger.warning(
                                 f"[{ticker}] 매도 API 호출 실패 (시도 {attempt + 1}/3), "
                                 f"{wait_time}초 후 재시도: {api_err}"
@@ -626,6 +694,11 @@ class SellAnalyzer:
                 confidence=parsed["confidence"],
                 reasoning=parsed["reasoning"],
                 suggested_sell_price=parsed.get("suggested_sell_price"),
+                technical_score=parsed.get("technical_score"),
+                position_risk_score=parsed.get("position_risk_score"),
+                fundamental_score=parsed.get("fundamental_score"),
+                sell_pressure=parsed.get("sell_pressure"),
+                exit_strategy=parsed.get("exit_strategy"),
                 current_price=holding_info.get("current_price"),
                 current_pnl_pct=holding_info.get("unrealized_pnl_pct"),
             )
@@ -655,16 +728,58 @@ class SellAnalyzer:
             return {}
 
         results = {}
-        logger.info(f"[매도 분석] 보유 종목 {len(holdings)}개 분석 시작")
 
-        for h in holdings:
+        import re as _re
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from google.api_core.exceptions import ResourceExhausted
+
+        def _parse_retry_delay(err) -> int:
+            m = _re.search(r"retry.*?(\d+)\.?\d*s", str(err), _re.IGNORECASE)
+            return int(m.group(1)) + 1 if m else 0
+
+        total = len(holdings)
+        concurrency = settings.GEMINI_CONCURRENCY
+        logger.info(f"[매도 분석] 보유 종목 {total}개 병렬 분석 시작 (동시 {concurrency}개)")
+
+        def _analyze_one(idx_holding):
+            idx, h = idx_holding
             ticker = h["ticker"]
-            try:
-                sig = self.analyze_holding(ticker, h)
-                results[ticker] = sig.signal if sig else "ERROR"
-            except Exception as e:
-                logger.error(f"[{ticker}] 매도 분석 중 예외: {e}")
-                results[ticker] = "ERROR"
+            # 스태거 딜레이: 동시 요청 폭주 방지
+            stagger = (idx % concurrency) * 1.0
+            if stagger > 0:
+                time.sleep(stagger)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    sig = self.analyze_holding(ticker, h)
+                    return ticker, sig.signal if sig else "ERROR"
+                except ResourceExhausted as e:
+                    if attempt < max_retries - 1:
+                        wait = max(settings.GEMINI_BACKOFF_BASE * (2 ** attempt), _parse_retry_delay(e))
+                        logger.warning(f"[{ticker}] 매도 API 429. {wait}초 대기 후 재시도... ({attempt+1}/{max_retries})")
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"[{ticker}] 매도 최대 재시도 실패(429)")
+                        return ticker, "ERROR"
+                except Exception as e:
+                    if '429' in str(e) and attempt < max_retries - 1:
+                        wait = max(settings.GEMINI_BACKOFF_BASE * (2 ** attempt), _parse_retry_delay(e))
+                        logger.warning(f"[{ticker}] 매도 API 429(str). {wait}초 대기 후 재시도...")
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"[{ticker}] 매도 분석 중 예외: {e}")
+                        return ticker, "ERROR"
+            return ticker, "ERROR"
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {
+                executor.submit(_analyze_one, (i, h)): h["ticker"]
+                for i, h in enumerate(holdings)
+            }
+            for future in as_completed(futures):
+                ticker, signal = future.result()
+                results[ticker] = signal
 
         sell_count = sum(1 for s in results.values() if s in ("SELL", "STRONG_SELL"))
         logger.info(f"[매도 분석] 완료 — 매도 신호: {sell_count}/{len(holdings)}개")
@@ -698,6 +813,11 @@ class SellAnalyzer:
                     "confidence": s.confidence,
                     "suggested_sell_price": s.suggested_sell_price,
                     "reasoning": s.reasoning,
+                    "technical_score": s.technical_score,
+                    "position_risk_score": s.position_risk_score,
+                    "fundamental_score": s.fundamental_score,
+                    "sell_pressure": s.sell_pressure,
+                    "exit_strategy": s.exit_strategy,
                     "current_price": s.current_price,
                     "current_pnl_pct": s.current_pnl_pct,
                     "signal_date": s.signal_date.strftime("%Y-%m-%d %H:%M"),

@@ -302,6 +302,13 @@ class SellSignal(Base):
     reasoning: Mapped[str] = mapped_column(Text, nullable=False)
     suggested_sell_price: Mapped[float | None] = mapped_column(Float)  # 제안 매도가
 
+    # 구조화 스코어 (3-pillar scoring)
+    technical_score: Mapped[float | None] = mapped_column(Float)        # 기술적 악화 0-10
+    position_risk_score: Mapped[float | None] = mapped_column(Float)    # 포지션 리스크 0-10
+    fundamental_score: Mapped[float | None] = mapped_column(Float)      # 펀더멘탈/심리 0-10
+    sell_pressure: Mapped[float | None] = mapped_column(Float)          # 매도 압력 종합 0-10
+    exit_strategy: Mapped[str | None] = mapped_column(String(20))       # IMMEDIATE|LIMIT_SELL|SCALE_OUT|HOLD_WITH_STOP
+
     # 신호 당시 상태
     current_price: Mapped[float | None] = mapped_column(Float)
     current_pnl_pct: Mapped[float | None] = mapped_column(Float)       # 현재 수익률 (%)

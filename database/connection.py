@@ -23,10 +23,12 @@ _engine_kwargs = dict(
 )
 
 if _is_sqlite:
-    from sqlalchemy.pool import StaticPool
+    # 병렬 분석(ThreadPoolExecutor) 지원을 위해 StaticPool 대신 QueuePool 사용
+    # StaticPool은 단일 연결 공유 → 스레드 간 동시 쓰기 충돌 발생
     _engine_kwargs.update(
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        pool_size=5,
+        max_overflow=10,
     )
 else:
     _engine_kwargs.update(

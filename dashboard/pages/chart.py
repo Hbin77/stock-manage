@@ -74,6 +74,11 @@ def _load_chart_data(ticker: str, days: int = 90):
                 "ma_20": r.ma_20,
                 "ma_50": r.ma_50,
                 "ma_200": r.ma_200,
+                "adx_14": r.adx_14,
+                "atr_14": r.atr_14,
+                "obv": r.obv,
+                "stoch_rsi_k": r.stoch_rsi_k,
+                "stoch_rsi_d": r.stoch_rsi_d,
             }
             for r in ind_rows
         ])
@@ -84,16 +89,19 @@ def _load_chart_data(ticker: str, days: int = 90):
 def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> go.Figure:
     """복합 차트 Figure를 생성합니다."""
     fig = make_subplots(
-        rows=4,
+        rows=7,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.03,
-        row_heights=[0.5, 0.15, 0.15, 0.20],
+        row_heights=[0.35, 0.10, 0.10, 0.12, 0.10, 0.10, 0.13],
         subplot_titles=[
             f"{ticker} 캔들스틱 + 이동평균 + 볼린저밴드",
             "MACD",
             "RSI",
             "거래량",
+            "ADX",
+            "StochRSI",
+            "OBV",
         ],
     )
 
@@ -114,8 +122,9 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
         row=1, col=1,
     )
 
+    ind_dates = ind_df["date"] if not ind_df.empty else pd.Series(dtype="object")
+
     if not ind_df.empty:
-        ind_dates = ind_df["date"]
 
         # 이동평균선
         for col_name, color, label in [
@@ -236,10 +245,78 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
         row=4, col=1,
     )
 
+    # ── Row 5: ADX ────────────────────────────────────────────────────────
+    if not ind_df.empty and "adx_14" in ind_df.columns:
+        adx_mask = ind_df["adx_14"].notna()
+        if adx_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=ind_dates[adx_mask],
+                    y=ind_df.loc[adx_mask, "adx_14"],
+                    mode="lines",
+                    name="ADX(14)",
+                    line=dict(color="#ff9800", width=1.5),
+                ),
+                row=5, col=1,
+            )
+            fig.add_hline(y=25, line_dash="dash", line_color="rgba(255,152,0,0.5)",
+                          annotation_text="추세 확인(25)", annotation_position="right", row=5, col=1)
+            fig.add_hline(y=20, line_dash="dash", line_color="rgba(255,152,0,0.3)",
+                          annotation_text="약한 추세(20)", annotation_position="right", row=5, col=1)
+
+    # ── Row 6: StochRSI ─────────────────────────────────────────────────────
+    if not ind_df.empty and "stoch_rsi_k" in ind_df.columns:
+        srsi_k_mask = ind_df["stoch_rsi_k"].notna()
+        if srsi_k_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=ind_dates[srsi_k_mask],
+                    y=ind_df.loc[srsi_k_mask, "stoch_rsi_k"],
+                    mode="lines",
+                    name="StochRSI K",
+                    line=dict(color="#29b6f6", width=1.5),
+                ),
+                row=6, col=1,
+            )
+        srsi_d_mask = ind_df["stoch_rsi_d"].notna() if "stoch_rsi_d" in ind_df.columns else pd.Series(False, index=ind_df.index)
+        if srsi_d_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=ind_dates[srsi_d_mask],
+                    y=ind_df.loc[srsi_d_mask, "stoch_rsi_d"],
+                    mode="lines",
+                    name="StochRSI D",
+                    line=dict(color="#ffa726", width=1.5),
+                ),
+                row=6, col=1,
+            )
+        if srsi_k_mask.any() or srsi_d_mask.any():
+            fig.add_hline(y=0.80, line_dash="dash", line_color="rgba(255,100,100,0.5)",
+                          annotation_text="과매수(0.80)", annotation_position="right", row=6, col=1)
+            fig.add_hline(y=0.20, line_dash="dash", line_color="rgba(100,200,100,0.5)",
+                          annotation_text="과매도(0.20)", annotation_position="right", row=6, col=1)
+
+    # ── Row 7: OBV ──────────────────────────────────────────────────────────
+    if not ind_df.empty and "obv" in ind_df.columns:
+        obv_mask = ind_df["obv"].notna()
+        if obv_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=ind_dates[obv_mask],
+                    y=ind_df.loc[obv_mask, "obv"],
+                    mode="lines",
+                    name="OBV",
+                    line=dict(color="#66bb6a", width=1.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(102,187,106,0.1)",
+                ),
+                row=7, col=1,
+            )
+
     # ── 레이아웃 ──────────────────────────────────────────────────────────────
     fig.update_layout(
         template="plotly_dark",
-        height=800,
+        height=1200,
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=60, r=20, t=60, b=20),
@@ -249,6 +326,9 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
     fig.update_yaxes(title_text="MACD", row=2, col=1)
     fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
     fig.update_yaxes(title_text="거래량", row=4, col=1)
+    fig.update_yaxes(title_text="ADX", row=5, col=1, range=[0, 60])
+    fig.update_yaxes(title_text="StochRSI", row=6, col=1, range=[0, 1])
+    fig.update_yaxes(title_text="OBV", row=7, col=1)
 
     return fig
 
@@ -289,7 +369,7 @@ def render():
     # 최신 지표 요약
     if ind_df is not None and not ind_df.empty:
         latest = ind_df.iloc[-1]
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         rsi_val = latest.get("rsi_14")
         c1.metric("RSI(14)", f"{rsi_val:.1f}" if rsi_val else "N/A")
         macd_val = latest.get("macd")
@@ -309,6 +389,10 @@ def render():
             c4.metric("vs MA50", f"{pct_from_ma50:+.2f}%")
         else:
             c4.metric("vs MA50", "N/A")
+        adx_val = latest.get("adx_14")
+        c5.metric("ADX(14)", f"{adx_val:.1f}" if adx_val else "N/A")
+        srsi_k_val = latest.get("stoch_rsi_k")
+        c6.metric("StochRSI K", f"{srsi_k_val:.2f}" if srsi_k_val is not None else "N/A")
 
     # 차트 출력
     fig = _build_chart(ticker, price_df, ind_df if ind_df is not None else pd.DataFrame())

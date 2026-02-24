@@ -146,7 +146,45 @@ def cmd_analyze():
     logger.info("─" * 40)
     for ticker, action in results.items():
         logger.info(f"  [{ticker}] → {action}")
-    logger.success("AI 매수 분석 완료")
+
+    buy_count = sum(1 for a in results.values() if a in ("BUY", "STRONG_BUY"))
+    logger.success(f"AI 매수 분석 완료 (BUY: {buy_count} / HOLD: {len(results) - buy_count})")
+
+    # Top 3 최종 추천
+    top_picks = ai_analyzer.get_top_picks(top_n=3)
+    if top_picks:
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("  🏆 TOP 3 최종 매수 추천")
+        logger.info("=" * 60)
+        for pick in top_picks:
+            upside_pct = ""
+            if pick["target_price"] and pick["price_at_recommendation"]:
+                pct = (pick["target_price"] / pick["price_at_recommendation"] - 1) * 100
+                upside_pct = f" (▲{pct:.1f}%)"
+
+            logger.info(f"")
+            logger.info(f"  #{pick['rank']} {pick['ticker']} ({pick['name']})")
+            logger.info(f"     Action: {pick['action']}  |  Confidence: {pick['confidence']:.0%}")
+            logger.info(f"     종합점수: {pick['composite_score']}  |  가중점수: {pick['weighted_score']}")
+            logger.info(
+                f"     기술: {pick['technical_score']}  |  "
+                f"펀더멘탈: {pick['fundamental_score']}  |  "
+                f"심리: {pick['sentiment_score']}"
+            )
+            if pick["target_price"]:
+                logger.info(
+                    f"     현재가: ${pick['price_at_recommendation']:.2f}  →  "
+                    f"목표가: ${pick['target_price']:.2f}{upside_pct}"
+                )
+            if pick["stop_loss"]:
+                logger.info(f"     손절가: ${pick['stop_loss']:.2f}  |  R/R비율: {pick['risk_reward_ratio']:.2f}")
+            # reasoning 첫 줄만 표시
+            reason = (pick["reasoning"] or "").split("\n")[0][:120]
+            if reason:
+                logger.info(f"     근거: {reason}")
+        logger.info("")
+        logger.info("=" * 60)
 
 
 def cmd_sell_check():

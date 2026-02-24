@@ -1,14 +1,16 @@
 """리스크 관리 엔진 - 포지션 사이징, 섹터 분산, 최대 손실 관리"""
+import os
+
 from loguru import logger
 from config.settings import settings
 
 
 class RiskManager:
-    # 리스크 파라미터 (향후 .env로 이동 가능)
-    MAX_POSITION_PCT = 0.10        # 포지션별 최대 비중 10%
-    MAX_HOLDINGS = 15              # 최대 동시 보유 종목 수
-    MAX_SECTOR_PCT = 0.30          # 섹터별 최대 비중 30%
-    MAX_PORTFOLIO_LOSS_PCT = -0.05 # 포트폴리오 일일 최대 손실 -5%
+    # 리스크 파라미터 (환경변수로 설정 가능)
+    MAX_POSITION_PCT = float(os.getenv("MAX_POSITION_PCT", "0.10"))
+    MAX_HOLDINGS = int(os.getenv("MAX_HOLDINGS", "30"))
+    MAX_SECTOR_PCT = float(os.getenv("MAX_SECTOR_PCT", "0.40"))
+    MAX_PORTFOLIO_LOSS_PCT = float(os.getenv("MAX_PORTFOLIO_LOSS_PCT", "-0.15"))
 
     def check_can_buy(self, ticker: str, sector: str = None) -> dict:
         """매수 가능 여부를 리스크 관점에서 판단합니다.
@@ -33,11 +35,12 @@ class RiskManager:
             if len(holdings) >= self.MAX_HOLDINGS:
                 return {"allowed": False, "reason": f"최대 보유 종목 수({self.MAX_HOLDINGS}) 초과", "max_amount_pct": 0}
 
-            # 2. 이미 보유 중인 종목인지 확인
+            # 2. 이미 보유 중인 종목인지 확인 (경고만, 차단 안함)
             for h in holdings:
                 stock = stock_map.get(h.stock_id)
                 if stock and stock.ticker == ticker:
-                    return {"allowed": False, "reason": f"이미 보유 중인 종목", "max_amount_pct": 0}
+                    logger.warning(f"[리스크] {ticker} 이미 보유 중 — 추가 매수 경고 (차단 안함)")
+                    break
 
             # 3. 섹터 집중도 확인 (종목 수 기반)
             if sector:

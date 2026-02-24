@@ -21,10 +21,14 @@ class Settings:
     # --- AI (Google Gemini) ---
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    AI_MAX_TOKENS: int = int(os.getenv("AI_MAX_TOKENS", "2048"))
+    AI_MAX_TOKENS: int = int(os.getenv("AI_MAX_TOKENS", "65536"))
     AI_TEMPERATURE: float = float(os.getenv("AI_TEMPERATURE", "0.40"))
-    BUY_CONFIDENCE_THRESHOLD: float = float(os.getenv("BUY_CONFIDENCE_THRESHOLD", "0.55"))
-    SELL_CONFIDENCE_THRESHOLD: float = float(os.getenv("SELL_CONFIDENCE_THRESHOLD", "0.60"))
+    BUY_CONFIDENCE_THRESHOLD: float = float(os.getenv("BUY_CONFIDENCE_THRESHOLD", "0.50"))
+    SELL_CONFIDENCE_THRESHOLD: float = float(os.getenv("SELL_CONFIDENCE_THRESHOLD", "0.50"))
+    GEMINI_CALL_DELAY: float = float(os.getenv("GEMINI_CALL_DELAY", "0.5"))
+    GEMINI_BACKOFF_BASE: float = float(os.getenv("GEMINI_BACKOFF_BASE", "2.0"))
+    GEMINI_TIMEOUT: int = int(os.getenv("GEMINI_TIMEOUT", "300"))
+    GEMINI_CONCURRENCY: int = int(os.getenv("GEMINI_CONCURRENCY", "5"))
 
     # --- 카카오톡 알림 ---
     KAKAO_REST_API_KEY: str = os.getenv("KAKAO_REST_API_KEY", "")

@@ -237,19 +237,21 @@ class MarketDataFetcher:
                 })
 
             for row_data in rows_to_save:
-                stmt = sqlite_insert(PriceHistory).values(**row_data)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=['stock_id', 'timestamp', 'interval'],
-                    set_={
-                        'open': stmt.excluded.open,
-                        'high': stmt.excluded.high,
-                        'low': stmt.excluded.low,
-                        'close': stmt.excluded.close,
-                        'adj_close': stmt.excluded.adj_close,
-                        'volume': stmt.excluded.volume,
-                    }
-                )
-                db.execute(stmt)
+                stmt = db.query(PriceHistory).filter(
+                    PriceHistory.stock_id == row_data["stock_id"],
+                    PriceHistory.timestamp == row_data["timestamp"],
+                    PriceHistory.interval == row_data["interval"]
+                ).first()
+                if stmt:
+                    stmt.open = row_data["open"]
+                    stmt.high = row_data["high"]
+                    stmt.low = row_data["low"]
+                    stmt.close = row_data["close"]
+                    stmt.adj_close = row_data["adj_close"]
+                    stmt.volume = row_data["volume"]
+                else:
+                    new_record = PriceHistory(**row_data)
+                    db.add(new_record)
             db.commit()
 
         logger.info(f"[{ticker}] {len(rows_to_save)}개 가격 데이터 저장 완료")

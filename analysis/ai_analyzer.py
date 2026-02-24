@@ -56,10 +56,11 @@ Evaluate ONLY from provided news items and their sentiment values:
 
 ### Step 6: Derive Action
 Calculate weighted_score = (technical * 0.45) + (fundamental * 0.30) + (sentiment * 0.25)
-- STRONG_BUY: weighted_score >= 7.0 AND technical_score >= 6.5 AND confidence >= 0.75
-- BUY: weighted_score >= 5.5 AND technical_score >= 4.5 AND confidence >= 0.55
+- STRONG_BUY: weighted_score >= 6.5 AND technical_score >= 6.0 AND confidence >= 0.70
+- BUY: weighted_score >= 5.0 AND technical_score >= 4.0 AND confidence >= 0.50
 - HOLD: below BUY thresholds
 IMPORTANT: If technical_score >= 6 but you output HOLD, you MUST explain why in reasoning.
+IMPORTANT: These are pre-filtered stocks (top 50 from 800+ universe). Expect 15-30% to be BUY candidates. Do NOT default to HOLD — evaluate objectively.
 
 ### Confidence Definition
 confidence = probability of positive return within 2-4 weeks:
@@ -98,35 +99,28 @@ class AIAnalyzer:
     """Google Gemini 기반 매수 추천 분석기"""
 
     def __init__(self):
-        self._model = None
+        self._client = None
 
-    def _get_model(self):
-        """Gemini 모델 지연 초기화 (캐싱)"""
-        if self._model is not None:
-            return self._model
+    def _get_client(self):
+        """Gemini 클라이언트 지연 초기화 (캐싱)"""
+        if self._client is not None:
+            return self._client
 
         if not settings.GEMINI_API_KEY:
             raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            self._model = genai.GenerativeModel(
-                model_name=settings.GEMINI_MODEL,
-                system_instruction=SYSTEM_PROMPT,
-                generation_config=genai.GenerationConfig(
-                    temperature=settings.AI_TEMPERATURE,
-                    max_output_tokens=settings.AI_MAX_TOKENS,
-                    response_mime_type="application/json",
-                ),
+            from google import genai
+            self._client = genai.Client(
+                api_key=settings.GEMINI_API_KEY,
             )
-            logger.debug(f"Gemini 모델 초기화 완료: {settings.GEMINI_MODEL}")
+            logger.debug(f"Gemini 클라이언트 초기화 완료: {settings.GEMINI_MODEL}")
         except ImportError:
             raise RuntimeError(
-                "google-generativeai 패키지가 설치되지 않았습니다. "
-                "pip install google-generativeai 로 설치하세요."
+                "google-genai 패키지가 설치되지 않았습니다. "
+                "pip install google-genai 로 설치하세요."
             )
-        return self._model
+        return self._client
 
     def _build_analysis_context(self, ticker: str, db) -> dict:
         """DB에서 분석 컨텍스트 데이터를 수집합니다."""
@@ -619,9 +613,9 @@ class AIAnalyzer:
         logger.info(f"[AI 분석] {ticker} 매수 분석 시작")
 
         try:
-            model = self._get_model()
+            client = self._get_client()
         except RuntimeError as e:
-            logger.error(f"[AI 분석] 모델 초기화 실패: {e}")
+            logger.error(f"[AI 분석] 클라이언트 초기화 실패: {e}")
             return None
 
         with get_db() as db:
@@ -639,15 +633,33 @@ class AIAnalyzer:
 
             try:
                 import time
+                import re as _re
+                from google.genai import types
                 last_err = None
                 for attempt in range(3):
                     try:
-                        response = model.generate_content(prompt)
+                        response = client.models.generate_content(
+                            model=settings.GEMINI_MODEL,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=SYSTEM_PROMPT,
+                                temperature=settings.AI_TEMPERATURE,
+                                max_output_tokens=settings.AI_MAX_TOKENS,
+                                thinking_config=types.ThinkingConfig(thinking_budget=1024),
+                                response_mime_type="application/json",
+                            ),
+                        )
+                        # 디버그: 응답 완성 여부 확인
+                        finish = response.candidates[0].finish_reason if response.candidates else "NO_CANDIDATES"
+                        logger.debug(f"[{ticker}] finish_reason={finish}, text_len={len(response.text) if response.text else 0}")
                         break
                     except Exception as api_err:
                         last_err = api_err
                         if attempt < 2:
-                            wait_time = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                            wait_time = settings.GEMINI_BACKOFF_BASE * (2 ** attempt)
+                            retry_match = _re.search(r"retry.*?(\d+)\.?\d*s", str(api_err), _re.IGNORECASE)
+                            if retry_match:
+                                wait_time = max(wait_time, int(retry_match.group(1)) + 1)
                             logger.warning(
                                 f"[{ticker}] API 호출 실패 (시도 {attempt + 1}/3), {wait_time}초 후 재시도: {api_err}"
                             )
@@ -662,15 +674,7 @@ class AIAnalyzer:
                 logger.error(f"[{ticker}] AI API 호출 실패: {e}")
                 return None
 
-            # 1. VIX 신뢰도 감쇄 (극단적 공포 시에만 — 프롬프트가 이미 VIX 20-30 처리)
-            vix_data = context.get("market_context", {}).get("^VIX")
-            if vix_data:
-                vix_level = vix_data.get("price")
-                if vix_level is not None and vix_level > 30:
-                    penalty = min(0.10, (vix_level - 30) / 100)
-                    parsed["confidence"] = round(parsed["confidence"] * (1 - penalty), 2)
-
-            # 2. 신뢰도 임계값 체크 (VIX 조정 후 최종 게이트)
+            # 신뢰도 임계값 체크 (최종 게이트)
             threshold = settings.BUY_CONFIDENCE_THRESHOLD
             if parsed["action"] in ("BUY", "STRONG_BUY") and parsed["confidence"] < threshold:
                 logger.info(
@@ -680,39 +684,18 @@ class AIAnalyzer:
                 parsed["action"] = "HOLD"
                 # confidence 유지 — 이미 낮은 값을 추가 감쇄하지 않음
 
-            # 3. VIX 극단적 수준에서 STRONG_BUY 다운그레이드만
-            if vix_data and isinstance(vix_data, dict):
-                vix_level = vix_data.get("price")
-                if vix_level is not None and vix_level > 35 and parsed["action"] == "STRONG_BUY":
-                    parsed["action"] = "BUY"
-                    logger.info(f"[{ticker}] VIX {vix_level:.1f} > 35 → BUY 다운그레이드")
-
-            # 신뢰도 보정: 과거 성과가 좋을 때만 상향 (하향 감쇄 금지)
-            try:
-                from analysis.backtester import backtester as _bt
-                breakdown = _bt.get_action_breakdown(days=90)
-                action_stats = {b["action"]: b for b in breakdown}
-                if parsed["action"] in action_stats:
-                    hist_win_rate = action_stats[parsed["action"]]["win_rate"] / 100.0
-                    if hist_win_rate > parsed["confidence"]:
-                        calibrated = 0.85 * parsed["confidence"] + 0.15 * hist_win_rate
-                        parsed["confidence"] = round(calibrated, 2)
-            except Exception:
-                pass
-
-            # 리스크 매니저 연동: BUY/STRONG_BUY인 경우 리스크 체크
+            # 리스크 매니저 연동: BUY/STRONG_BUY인 경우 리스크 체크 (경고만, 차단 안함)
             if parsed["action"] in ("BUY", "STRONG_BUY"):
                 try:
                     from analysis.risk_manager import risk_manager
                     sector = stock.sector if stock else None
                     risk_check = risk_manager.check_can_buy(ticker, sector)
                     if not risk_check["allowed"]:
-                        logger.info(
-                            f"[{ticker}] 리스크 체크 실패: {risk_check['reason']} "
-                            f"→ HOLD 다운그레이드 (원래: {parsed['action']})"
+                        logger.warning(
+                            f"[{ticker}] 리스크 경고: {risk_check['reason']} "
+                            f"(BUY 유지, reasoning에 메모)"
                         )
-                        parsed["reasoning"] += f" [리스크 관리: {risk_check['reason']}]"
-                        parsed["action"] = "HOLD"
+                        parsed["reasoning"] += f" [리스크 경고: {risk_check['reason']}]"
                 except Exception as risk_err:
                     logger.debug(f"[{ticker}] 리스크 체크 실패 (무시): {risk_err}")
 
@@ -743,47 +726,67 @@ class AIAnalyzer:
 
     def get_priority_tickers(self, max_count: int = 50) -> list[str]:
         """
-        Multi-factor scoring: dual sub-model (momentum + mean-reversion)
-        with market regime-adaptive blending.
+        5-Factor Scoring Model v2.0
 
-        Scans all 818 tickers using DB-cached indicators (no API calls).
-        Selects top max_count for AI analysis.
+        Factor Groups (각 0-10 정규화):
+          F1. Trend Quality  — MA 정렬, MA 구조, 가격 위치
+          F2. Momentum       — MACD, RSI zone, 5일 수익률(ROC)
+          F3. Mean-Reversion — RSI 과매도, StochRSI, BB 위치/스퀴즈
+          F4. Volume         — 거래량 비율, OBV 추세 (중립 기준선)
+          F5. Trend Strength — ADX 수준
+
+        개선사항 (v1 대비):
+          - 모든 factor를 0-10 동일 스케일 정규화 → 불균형 해소
+          - Volume: 중립 기준선 5.0 (v1은 91.7% 페널티 문제)
+          - ADX: momentum/reversion 양쪽에 적용 (micro-regime)
+          - MA200 penalty: momentum/reversion 양쪽 적용
+          - Penalty: 모두 multiplicative로 통일
+          - RSI 40-50 dead zone 해소
+          - 섹터 다양성 캡 (최대 20%)
+          - ROC(5일 수익률) 추가
         """
         from database.models import TechnicalIndicator, PriceHistory
         from datetime import timedelta
-        from config.tickers import ALL_TICKERS
+        from config.tickers import ALL_TICKERS, TICKER_INDEX
 
-        watchlist = ALL_TICKERS
-        scores: dict[str, float] = {}
+        # ETF 제외: 개별 주식만 스코어링 대상
+        watchlist = [t for t in ALL_TICKERS if "ETF" not in TICKER_INDEX.get(t, [])]
+        logger.info(f"[AI Priority v2] ETF 제외: {len(ALL_TICKERS)} → {len(watchlist)}개 개별 주식")
 
-        cutoff_date = datetime.now() - timedelta(days=5)  # 주말+공휴일 대비
-
-        # ── STEP 0: Market Regime Detection ──
-        regime_mom_w = 0.65  # default: 65% momentum, 35% reversion
-        regime_rev_w = 0.35
+        # ── STEP 0: VIX Macro-Regime ──
+        vix_level = 18.0
         regime_name = "trending"
-
         try:
             from data_fetcher.market_data import market_fetcher as _mf
             vix_data = _mf.fetch_realtime_price("^VIX")
             vix_level = vix_data["price"] if vix_data else 18.0
+        except Exception:
+            pass
 
-            if vix_level > 28:
-                regime_name = "high_volatility"
-                regime_mom_w, regime_rev_w = 0.25, 0.75
-            elif vix_level > 20:
-                regime_name = "transitional"
-                regime_mom_w, regime_rev_w = 0.45, 0.55
-            else:
-                regime_name = "trending"
-                regime_mom_w, regime_rev_w = 0.70, 0.30
+        # VIX 기반 글로벌 가중치 (5 factor)
+        if vix_level > 28:
+            regime_name = "high_volatility"
+            weights = {"trend": 0.15, "momentum": 0.10, "reversion": 0.40, "volume": 0.15, "strength": 0.20}
+        elif vix_level > 20:
+            regime_name = "transitional"
+            weights = {"trend": 0.25, "momentum": 0.25, "reversion": 0.20, "volume": 0.15, "strength": 0.15}
+        else:
+            regime_name = "trending"
+            weights = {"trend": 0.30, "momentum": 0.30, "reversion": 0.10, "volume": 0.15, "strength": 0.15}
 
-            logger.debug(f"[Scoring] Regime={regime_name} VIX={vix_level:.1f} mom={regime_mom_w:.0%} rev={regime_rev_w:.0%}")
-        except Exception as e:
-            logger.debug(f"[Scoring] Regime detection failed: {e}")
+        logger.debug(f"[Priority v2] Regime={regime_name} VIX={vix_level:.1f} weights={weights}")
 
-        # ── STEP 1-5: Per-stock scoring ──
+        # ── STEP 1: Per-stock 5-factor scoring ──
+        stock_scores: list[dict] = []
+
         with get_db() as db:
+            latest_ind = db.query(TechnicalIndicator).order_by(TechnicalIndicator.date.desc()).first()
+            cutoff_date = (
+                latest_ind.date - timedelta(days=7)
+                if latest_ind
+                else datetime.now() - timedelta(days=14)
+            )
+
             for ticker in watchlist:
                 stock = db.query(Stock).filter(Stock.ticker == ticker).first()
                 if stock is None:
@@ -826,107 +829,219 @@ class AIAnalyzer:
 
                 current_price = price_rows[0].close
                 latest_volume = price_rows[0].volume
+                if not current_price:
+                    continue
 
-                # ── MOMENTUM SUB-SCORE ──
-                momentum = 0.0
+                # ═══════════════════════════════════════
+                # F1: TREND QUALITY (0-10)
+                # ═══════════════════════════════════════
+                f_trend = 0.0
 
-                # M1: MA Alignment (0-4)
-                ma_count = 0
-                if current_price and ind.ma_20 and current_price > ind.ma_20: ma_count += 1
-                if current_price and ind.ma_50 and current_price > ind.ma_50: ma_count += 1
-                if current_price and ind.ma_200 and current_price > ind.ma_200: ma_count += 1
-                if ind.ma_20 and ind.ma_50 and ind.ma_200 and ind.ma_20 > ind.ma_50 > ind.ma_200:
-                    ma_count += 1  # Perfect stacking bonus
-                momentum += min(ma_count, 4)
+                # T1: MA Alignment — price vs MA20/50/200 (0-3)
+                if ind.ma_20 and current_price > ind.ma_20:
+                    f_trend += 1.0
+                if ind.ma_50 and current_price > ind.ma_50:
+                    f_trend += 1.0
+                if ind.ma_200 and current_price > ind.ma_200:
+                    f_trend += 1.0
 
-                # M2: MACD (0-3)
+                # T2: MA Structure — perfect stacking MA20 > MA50 > MA200 (+2)
+                if (ind.ma_20 and ind.ma_50 and ind.ma_200
+                        and ind.ma_20 > ind.ma_50 > ind.ma_200):
+                    f_trend += 2.0
+
+                # T3: MA50 > MA200 — Minervini 핵심 조건 (+1.5)
+                if ind.ma_50 and ind.ma_200 and ind.ma_50 > ind.ma_200:
+                    f_trend += 1.5
+
+                # T4: MA200 Slope — 현재 MA200 vs 이전 MA200 비교 (+1.5)
+                if (prev_ind and ind.ma_200 and prev_ind.ma_200
+                        and ind.ma_200 > prev_ind.ma_200):
+                    f_trend += 1.5  # MA200 상승 추세
+
+                # T5: BB Position — 상단 근처 = 추세 확인 (+1)
+                bb_pct = 50.0
+                if (ind.bb_upper and ind.bb_lower
+                        and (ind.bb_upper - ind.bb_lower) > 0):
+                    bb_pct = (current_price - ind.bb_lower) / (ind.bb_upper - ind.bb_lower) * 100
+                    if bb_pct > 70:
+                        f_trend += 1.0
+
+                f_trend = min(f_trend, 10.0)
+
+                # ═══════════════════════════════════════
+                # F2: MOMENTUM SIGNAL (0-10)
+                # ═══════════════════════════════════════
+                f_momentum = 0.0
+
+                # Mo1: MACD Histogram (0-3)
                 is_golden_cross = False
                 macd_pts = 0.0
                 if ind.macd_hist is not None:
                     if (prev_ind and prev_ind.macd_hist is not None
-                            and prev_ind.macd_hist <= 0 and ind.macd_hist > 0):
+                            and prev_ind.macd_hist <= 0 < ind.macd_hist):
                         is_golden_cross = True
-                        macd_pts = 2.5
+                        macd_pts = 3.0
                     elif ind.macd_hist > 0:
                         macd_pts = 1.5
-                        if prev_ind and prev_ind.macd_hist is not None and ind.macd_hist > prev_ind.macd_hist:
+                        if (prev_ind and prev_ind.macd_hist is not None
+                                and ind.macd_hist > prev_ind.macd_hist):
                             macd_pts = 2.0  # Accelerating
-                momentum += min(macd_pts, 3.0)
+                f_momentum += min(macd_pts, 3.0)
 
-                # M3: ADX multiplier
-                adx_mult = 1.0
-                if ind.adx_14 is not None:
-                    if ind.adx_14 > 30: adx_mult = 1.3
-                    elif ind.adx_14 > 25: adx_mult = 1.15
-                    elif ind.adx_14 < 20: adx_mult = 0.7
-                momentum *= adx_mult
-
-                # M4: RSI Momentum Zone (50-65 in uptrend)
-                if ind.rsi_14 is not None and 50 <= ind.rsi_14 <= 65:
-                    momentum += 1.5
-
-                # ── MEAN-REVERSION SUB-SCORE ──
-                reversion = 0.0
-
-                # R1: RSI Oversold (0-3)
+                # Mo2: RSI Momentum Zone (0-2.5) — dead zone 해소
                 if ind.rsi_14 is not None:
-                    if ind.rsi_14 < 25: reversion += 3.0
-                    elif ind.rsi_14 < 30: reversion += 2.5
-                    elif ind.rsi_14 < 35: reversion += 1.5
-                    elif ind.rsi_14 < 40: reversion += 0.5
+                    if 55 <= ind.rsi_14 <= 65:
+                        f_momentum += 2.5  # 최적 모멘텀 존
+                    elif 50 <= ind.rsi_14 < 55:
+                        f_momentum += 2.0
+                    elif 45 <= ind.rsi_14 < 50:
+                        f_momentum += 1.0  # v1에서 dead zone이었던 구간
+                    elif 65 < ind.rsi_14 <= 70:
+                        f_momentum += 1.5  # 강한 모멘텀 (과매수 직전)
 
-                # R2: StochRSI oversold cross (0-2)
+                # Mo3: 5일 수익률 ROC (0-2.5)
+                if len(price_rows) >= 5 and price_rows[4].close > 0:
+                    roc_5d = (current_price - price_rows[4].close) / price_rows[4].close
+                    if roc_5d > 0.05:
+                        f_momentum += 2.5
+                    elif roc_5d > 0.03:
+                        f_momentum += 2.0
+                    elif roc_5d > 0.01:
+                        f_momentum += 1.0
+                    elif roc_5d > 0:
+                        f_momentum += 0.5
+
+                # Mo4: Bull Trap Guard — golden cross 신뢰성 (multiplicative penalty)
+                if is_golden_cross:
+                    trap_factor = 1.0
+                    if (latest_volume and ind.volume_ma_20
+                            and latest_volume < ind.volume_ma_20 * 0.8):
+                        trap_factor *= 0.7  # 거래량 미동반 → 30% 감소
+                    if (ind.ma_20 and ind.ma_50
+                            and current_price < ind.ma_20
+                            and current_price < ind.ma_50):
+                        trap_factor *= 0.6  # MA 아래에서 GC → 40% 추가 감소
+                    f_momentum *= trap_factor
+
+                f_momentum = min(f_momentum, 10.0)
+
+                # ═══════════════════════════════════════
+                # F3: MEAN-REVERSION (0-10)
+                # ═══════════════════════════════════════
+                f_reversion = 0.0
+
+                # Re1: RSI Oversold (0-3.5)
+                if ind.rsi_14 is not None:
+                    if ind.rsi_14 < 25:
+                        f_reversion += 3.5
+                    elif ind.rsi_14 < 30:
+                        f_reversion += 3.0
+                    elif ind.rsi_14 < 35:
+                        f_reversion += 2.0
+                    elif ind.rsi_14 < 40:
+                        f_reversion += 1.0
+
+                # Re2: StochRSI Oversold Cross (0-2.5)
                 if ind.stoch_rsi_k is not None and ind.stoch_rsi_d is not None:
                     if ind.stoch_rsi_k < 0.20 and ind.stoch_rsi_d < 0.20:
-                        reversion += 1.0
+                        f_reversion += 1.0
                         if (prev_ind and prev_ind.stoch_rsi_k is not None
                                 and prev_ind.stoch_rsi_d is not None
                                 and prev_ind.stoch_rsi_k <= prev_ind.stoch_rsi_d
                                 and ind.stoch_rsi_k > ind.stoch_rsi_d):
-                            reversion += 1.0  # Bullish cross in oversold
+                            f_reversion += 1.5  # Bullish cross in oversold
 
-                # R3: BB Position (0-2.5)
-                if (current_price and ind.bb_upper and ind.bb_lower
-                        and (ind.bb_upper - ind.bb_lower) > 0):
-                    bb_pct = (current_price - ind.bb_lower) / (ind.bb_upper - ind.bb_lower) * 100
-                    if bb_pct < 10: reversion += 2.5
-                    elif bb_pct < 20: reversion += 2.0
-                    elif bb_pct < 30: reversion += 1.0
+                # Re3: BB Position — 하단 근처 (0-2.5)
+                if bb_pct < 10:
+                    f_reversion += 2.5
+                elif bb_pct < 20:
+                    f_reversion += 2.0
+                elif bb_pct < 30:
+                    f_reversion += 1.0
 
-                # R4: BB Squeeze (0-1.5)
-                if (ind.bb_upper and ind.bb_lower and ind.bb_middle and ind.bb_middle > 0
-                        and prev_ind and prev_ind.bb_upper and prev_ind.bb_lower
-                        and prev_ind.bb_middle and prev_ind.bb_middle > 0):
+                # Re4: BB Squeeze (0-1.5)
+                if (ind.bb_upper and ind.bb_lower and ind.bb_middle
+                        and ind.bb_middle > 0
+                        and prev_ind and prev_ind.bb_upper
+                        and prev_ind.bb_lower and prev_ind.bb_middle
+                        and prev_ind.bb_middle > 0):
                     bb_width = (ind.bb_upper - ind.bb_lower) / ind.bb_middle
                     prev_width = (prev_ind.bb_upper - prev_ind.bb_lower) / prev_ind.bb_middle
                     if bb_width < 0.04 and bb_width < prev_width:
-                        reversion += 1.5
+                        f_reversion += 1.5
                     elif bb_width < 0.06:
-                        reversion += 0.5
+                        f_reversion += 0.5
 
-                # ── VOLUME MULTIPLIER ──
-                vol_mult = 1.0
+                f_reversion = min(f_reversion, 10.0)
+
+                # ═══════════════════════════════════════
+                # F4: VOLUME CONFIRMATION (0-10)
+                # 중립 기준선 5.0 — v1의 91.7% 페널티 문제 해결
+                # ═══════════════════════════════════════
+                f_volume = 5.0  # NEUTRAL baseline
+
                 if latest_volume and ind.volume_ma_20 and ind.volume_ma_20 > 0:
                     vr = latest_volume / ind.volume_ma_20
-                    if vr > 2.0: vol_mult = 1.4
-                    elif vr > 1.3: vol_mult = 1.2
-                    elif vr < 0.5: vol_mult = 0.6
-                    elif vr < 0.8: vol_mult = 0.8
+                    if vr > 2.5:
+                        f_volume = 10.0  # 폭발적 거래량
+                    elif vr > 2.0:
+                        f_volume = 9.0
+                    elif vr > 1.5:
+                        f_volume = 8.0
+                    elif vr > 1.2:
+                        f_volume = 7.0
+                    elif vr > 0.8:
+                        f_volume = 5.0  # 정상 범위 → 중립
+                    elif vr > 0.5:
+                        f_volume = 4.0  # 약간 낮음 (경미한 감점)
+                    else:
+                        f_volume = 3.0  # 매우 낮음
 
-                # ── OBV DIVERGENCE BONUS ──
-                obv_bonus = 0.0
+                # OBV 추세 (±1.5 가감)
                 if ind.obv is not None and prev_ind and prev_ind.obv is not None:
                     obv_chg = ind.obv - prev_ind.obv
-                    price_chg = price_rows[0].close - price_rows[1].close if len(price_rows) >= 2 else 0
+                    price_chg = (
+                        price_rows[0].close - price_rows[1].close
+                        if len(price_rows) >= 2 else 0
+                    )
                     if obv_chg > 0 and price_chg <= 0:
-                        obv_bonus = 1.5  # Bullish divergence
+                        f_volume += 1.5  # Bullish divergence
                     elif obv_chg > 0 and price_chg > 0:
-                        obv_bonus = 0.5
+                        f_volume += 0.5  # Confirming
+                    elif obv_chg < 0 and price_chg > 0:
+                        f_volume -= 1.5  # Bearish divergence (대칭)
 
-                # ── PENALTIES ──
+                f_volume = max(0.0, min(f_volume, 10.0))
 
-                # P1: Falling knife
-                knife_pen = 0.0
+                # ═══════════════════════════════════════
+                # F5: TREND STRENGTH / ADX (0-10)
+                # ═══════════════════════════════════════
+                f_strength = 5.0  # 중립
+                raw_adx = ind.adx_14
+
+                if raw_adx is not None:
+                    if raw_adx > 40:
+                        f_strength = 10.0
+                    elif raw_adx > 35:
+                        f_strength = 9.0
+                    elif raw_adx > 30:
+                        f_strength = 8.0
+                    elif raw_adx > 25:
+                        f_strength = 7.0
+                    elif raw_adx > 20:
+                        f_strength = 5.0  # 중립
+                    elif raw_adx > 15:
+                        f_strength = 3.5
+                    else:
+                        f_strength = 2.0  # 추세 없음
+
+                # ═══════════════════════════════════════
+                # GLOBAL PENALTIES (multiplicative, 양쪽 적용)
+                # ═══════════════════════════════════════
+                penalty_mult = 1.0
+
+                # P1: Falling Knife (연속 하락일)
                 if len(price_rows) >= 4:
                     down_days = 0
                     for i in range(min(len(price_rows) - 1, 4)):
@@ -934,57 +1049,118 @@ class AIAnalyzer:
                             down_days += 1
                         else:
                             break
-                    if down_days >= 4: knife_pen = 0.4
-                    elif down_days >= 3: knife_pen = 0.25
+                    if down_days >= 4:
+                        penalty_mult *= 0.6
+                    elif down_days >= 3:
+                        penalty_mult *= 0.75
 
-                # Below MA200 = reduce reversion score
-                if current_price and ind.ma_200 and current_price < ind.ma_200:
-                    reversion *= 0.5
+                # P2: Below MA200 — 양쪽 동시 감소 (v1은 reversion만)
+                if ind.ma_200 and current_price < ind.ma_200:
+                    f_momentum *= 0.5   # 약세 추세에서 momentum 신뢰도 ↓
+                    f_reversion *= 0.7  # 약세지만 반등 가능성은 일부 유지
 
-                # P2: Bull trap for golden cross
-                if is_golden_cross:
-                    trap = 0.0
-                    if latest_volume and ind.volume_ma_20 and latest_volume < ind.volume_ma_20 * 0.8:
-                        trap += 0.2
-                    if (current_price and ind.ma_20 and ind.ma_50
-                            and current_price < ind.ma_20 and current_price < ind.ma_50):
-                        trap += 0.3
-                    if trap > 0:
-                        momentum -= macd_pts * min(trap, 0.5)
-                        momentum = max(momentum, 0)
-
-                # P3: Overbought guard
+                # P3: Overbought Guard (RSI > 75)
                 if ind.rsi_14 is not None and ind.rsi_14 > 75:
-                    momentum *= 0.3
-                    reversion = 0
+                    f_momentum *= 0.5
+                    f_reversion *= 0.2
 
-                # ── FINAL SCORE ──
-                raw = regime_mom_w * momentum + regime_rev_w * reversion
-                adjusted = raw * vol_mult + obv_bonus
-                final = adjusted * (1.0 - knife_pen)
-                final = max(final, 0.0)
+                # ═══════════════════════════════════════
+                # ADX MICRO-REGIME (종목별 momentum/reversion 가중치 조정)
+                # ═══════════════════════════════════════
+                local_weights = dict(weights)  # copy global weights
+                if raw_adx is not None:
+                    if raw_adx > 30:
+                        # 강한 추세 → momentum 가중 ↑, reversion 가중 ↓
+                        local_weights["momentum"] = min(local_weights["momentum"] + 0.05, 0.40)
+                        local_weights["reversion"] = max(local_weights["reversion"] - 0.05, 0.05)
+                    elif raw_adx < 20:
+                        # 비추세 (레인지) → reversion 가중 ↑, momentum 가중 ↓
+                        local_weights["reversion"] = min(local_weights["reversion"] + 0.10, 0.45)
+                        local_weights["momentum"] = max(local_weights["momentum"] - 0.10, 0.05)
 
-                if final > 0.5:
-                    scores[ticker] = round(final, 2)
+                # 가중치 합계 정규화 (항상 1.0)
+                w_sum = sum(local_weights.values())
+                if w_sum > 0:
+                    local_weights = {k: v / w_sum for k, v in local_weights.items()}
 
-        sorted_tickers = sorted(scores, key=lambda t: scores[t], reverse=True)
-        selected = sorted_tickers[:max_count]
+                # ═══════════════════════════════════════
+                # COMPOSITE SCORE
+                # ═══════════════════════════════════════
+                composite = (
+                    local_weights["trend"] * f_trend
+                    + local_weights["momentum"] * f_momentum
+                    + local_weights["reversion"] * f_reversion
+                    + local_weights["volume"] * f_volume
+                    + local_weights["strength"] * f_strength
+                )
+                composite *= penalty_mult
+                composite = max(composite, 0.0)
 
+                stock_scores.append({
+                    "ticker": ticker,
+                    "score": round(composite, 3),
+                    "f_trend": round(f_trend, 1),
+                    "f_momentum": round(f_momentum, 1),
+                    "f_reversion": round(f_reversion, 1),
+                    "f_volume": round(f_volume, 1),
+                    "f_strength": round(f_strength, 1),
+                    "category": TICKER_INDEX.get(ticker, []),
+                })
+
+        # ── STEP 2: 정렬 ──
+        stock_scores.sort(key=lambda x: x["score"], reverse=True)
+
+        # ── STEP 3: 섹터 다양성 캡 (최대 20%) ──
+        sector_cap = max(3, max_count // 5)  # 50개 기준 = 10개/섹터
+        sector_counts: dict[str, int] = {}
+        selected: list[str] = []
+
+        for item in stock_scores:
+            if len(selected) >= max_count:
+                break
+
+            # 주요 카테고리 결정 (첫 번째 non-ETF 카테고리)
+            categories = [c for c in item["category"] if c != "ETF"]
+            primary_sector = categories[0] if categories else "OTHER"
+
+            count = sector_counts.get(primary_sector, 0)
+            if count >= sector_cap:
+                continue  # 이 섹터 이미 한도 도달 → 스킵
+
+            selected.append(item["ticker"])
+            sector_counts[primary_sector] = count + 1
+
+        # ── STEP 4: 로깅 ──
+        scored_count = len(stock_scores)
+        avg_score = sum(s["score"] for s in stock_scores) / scored_count if scored_count else 0
         logger.info(
-            f"[AI Priority] Regime={regime_name} | Scanned {len(watchlist)}, "
-            f"scored {len(scores)}, selected top {len(selected)}"
+            f"[AI Priority v2] Regime={regime_name} VIX={vix_level:.1f} | "
+            f"Scored {scored_count}/{len(watchlist)} stocks | "
+            f"avg={avg_score:.2f} | selected {len(selected)}"
         )
         if selected:
-            top5 = [(t, f"{scores[t]:.2f}") for t in selected[:5]]
-            logger.debug(f"[AI Priority] Top 5: {top5}")
+            top5_info = [
+                next(s for s in stock_scores if s["ticker"] == t)
+                for t in selected[:5]
+            ]
+            for s in top5_info:
+                logger.debug(
+                    f"  [{s['ticker']}] score={s['score']:.2f} "
+                    f"T={s['f_trend']} M={s['f_momentum']} "
+                    f"R={s['f_reversion']} V={s['f_volume']} S={s['f_strength']}"
+                )
+            logger.info(
+                f"[AI Priority v2] Sector distribution: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(sector_counts.items(), key=lambda x: -x[1]))
+            )
 
         return selected
 
     def analyze_all_watchlist(self) -> dict[str, str]:
         """
         watchlist 전체를 기술적 필터링 후 상위 50개 종목을 AI 분석합니다.
-        무료 티어 API 제한(RPM 15) 우회를 위해 5초의 대기 시간을 갖고, 
-        429 Quota 에러 시 60초 대기 후 재시도하는 로직(Backoff)을 포함합니다.
+        유료 티어 전환 후 GEMINI_CALL_DELAY(기본 0.5초) 간격으로 호출하며,
+        429 에러 시 GEMINI_BACKOFF_BASE 기반 지수 백오프를 적용합니다.
 
         Returns:
             {ticker: action} 딕셔너리
@@ -1006,43 +1182,57 @@ class AIAnalyzer:
             logger.info(f"[AI 분석] 전체 종목 분석 시작: {tickers}")
 
         import time
+        import re as _re
         from google.api_core.exceptions import ResourceExhausted
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for i, ticker in enumerate(tickers):
+        def _parse_retry_delay(err) -> int:
+            """구글 429 응답에서 retry_delay 초를 파싱"""
+            m = _re.search(r"retry.*?(\d+)\.?\d*s", str(err), _re.IGNORECASE)
+            return int(m.group(1)) + 1 if m else 0
+
+        total = len(tickers)
+        concurrency = settings.GEMINI_CONCURRENCY
+        logger.info(f"[AI 분석] {total}개 종목 병렬 분석 시작 (동시 {concurrency}개)")
+
+        def _analyze_one(idx_ticker):
+            idx, ticker = idx_ticker
+            # 스태거 딜레이: 동시 요청 폭주 방지 (인덱스 % 동시수 × 1초)
+            stagger = (idx % concurrency) * 1.0
+            if stagger > 0:
+                time.sleep(stagger)
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    logger.info(f"[AI 분석] ({i+1}/{len(tickers)}) {ticker} 시도 중...")
+                    logger.info(f"[AI 분석] ({idx+1}/{total}) {ticker} 시도 중...")
                     rec = self.analyze_ticker(ticker)
-                    results[ticker] = rec.action if rec else "ERROR"
-                    break # 성공 시 재시도 루프 탈출
-
+                    return ticker, rec.action if rec else "ERROR"
                 except ResourceExhausted as e:
-                    # 429 오류 명시적 캡처 (Quota Exceeded)
                     if attempt < max_retries - 1:
-                        logger.warning(f"[{ticker}] API 할당량 초과(429). 60초 대기 후 재시도... ({attempt+1}/{max_retries})")
-                        time.sleep(60) # 60초 대기하며 쿼터 리셋 기다림
+                        wait = max(settings.GEMINI_BACKOFF_BASE * (2 ** attempt), _parse_retry_delay(e))
+                        logger.warning(f"[{ticker}] API 할당량 초과(429). {wait}초 대기 후 재시도... ({attempt+1}/{max_retries})")
+                        time.sleep(wait)
                     else:
-                        logger.error(f"[{ticker}] 최대 재시도(3회) 실패(429 Error). 다음 종목으로 넘어갑니다: {e}")
-                        results[ticker] = "ERROR"
-
+                        logger.error(f"[{ticker}] 최대 재시도(3회) 실패(429 Error): {e}")
+                        return ticker, "ERROR"
                 except Exception as e:
-                    # 기타 치명적 에러 시 재시도하지 않고 넘어감
-                    if '429' in str(e):
-                        if attempt < max_retries - 1:
-                            logger.warning(f"[{ticker}] API 할당량 초과(429 str). 60초 대기 후 재시도... ({attempt+1}/{max_retries})")
-                            time.sleep(60)
-                        else:
-                            logger.error(f"[{ticker}] 최대 재시도 실패(429 Error): {e}")
-                            results[ticker] = "ERROR"
+                    if '429' in str(e) and attempt < max_retries - 1:
+                        wait = max(settings.GEMINI_BACKOFF_BASE * (2 ** attempt), _parse_retry_delay(e))
+                        logger.warning(f"[{ticker}] API 할당량 초과(429 str). {wait}초 대기 후 재시도... ({attempt+1}/{max_retries})")
+                        time.sleep(wait)
                     else:
                         logger.error(f"[{ticker}] 분석 중 예외 발생: {e}")
-                        results[ticker] = "ERROR"
-                        break
+                        return ticker, "ERROR"
+            return ticker, "ERROR"
 
-            # Rate limit: 평상시 호출 딜레이 (분당 최대 13건 이하 통제)
-            if i < len(tickers) - 1:
-                time.sleep(4.5)
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {
+                executor.submit(_analyze_one, (i, t)): t
+                for i, t in enumerate(tickers)
+            }
+            for future in as_completed(futures):
+                ticker, action = future.result()
+                results[ticker] = action
 
         buy_count = sum(1 for a in results.values() if a in ("BUY", "STRONG_BUY"))
         logger.info(f"[AI 분석] 구동 완료 — 매수 추천: {buy_count}/{len(tickers)}개 분석 완료")
@@ -1081,6 +1271,99 @@ class AIAnalyzer:
                 })
 
         return results
+
+    def get_top_picks(self, top_n: int = 3) -> list[dict]:
+        """
+        오늘의 BUY/STRONG_BUY 추천 중 복합 점수 기준 상위 N개를 반환합니다.
+
+        복합 점수 = weighted_score * 0.40 + confidence * 10 * 0.25
+                   + risk_reward_ratio * 0.20 + sentiment_score * 0.15
+
+        Returns:
+            상위 N개 추천 리스트 (딕셔너리)
+        """
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        with get_db() as db:
+            recs = (
+                db.query(AIRecommendation)
+                .filter(
+                    AIRecommendation.recommendation_date >= today_start,
+                    AIRecommendation.action.in_(["BUY", "STRONG_BUY"]),
+                )
+                .all()
+            )
+
+            if not recs:
+                logger.info("[Top Picks] 오늘 BUY/STRONG_BUY 추천이 없습니다.")
+                return []
+
+            scored = []
+            for r in recs:
+                stock = db.query(Stock).filter(Stock.id == r.stock_id).first()
+                ticker = stock.ticker if stock else "?"
+                name = stock.name if stock else "?"
+
+                # 개별 점수 (None → 0 처리)
+                ts = r.technical_score or 0.0
+                fs = r.fundamental_score or 0.0
+                ss = r.sentiment_score or 0.0
+                conf = r.confidence or 0.0
+
+                # weighted_score 계산 (DB에 없으면 직접 계산)
+                weighted = ts * 0.45 + fs * 0.30 + ss * 0.25
+
+                # 리스크/리워드 비율 (target_price / stop_loss 기반)
+                rr_ratio = 0.0
+                if r.target_price and r.stop_loss and r.price_at_recommendation:
+                    upside = r.target_price - r.price_at_recommendation
+                    downside = r.price_at_recommendation - r.stop_loss
+                    if downside > 0:
+                        rr_ratio = min(upside / downside, 5.0)  # 최대 5로 캡
+
+                # 복합 점수 (0~10 스케일)
+                composite = (
+                    weighted * 0.40
+                    + conf * 10 * 0.25
+                    + rr_ratio * 0.20
+                    + ss * 0.15
+                )
+
+                # STRONG_BUY 보너스 (+0.5)
+                if r.action == "STRONG_BUY":
+                    composite += 0.5
+
+                scored.append({
+                    "rank": 0,
+                    "ticker": ticker,
+                    "name": name,
+                    "action": r.action,
+                    "composite_score": round(composite, 2),
+                    "confidence": round(conf, 2),
+                    "weighted_score": round(weighted, 2),
+                    "technical_score": round(ts, 1),
+                    "fundamental_score": round(fs, 1),
+                    "sentiment_score": round(ss, 1),
+                    "risk_reward_ratio": round(rr_ratio, 2),
+                    "target_price": r.target_price,
+                    "stop_loss": r.stop_loss,
+                    "price_at_recommendation": r.price_at_recommendation,
+                    "reasoning": r.reasoning,
+                })
+
+            # 복합 점수 기준 내림차순 정렬
+            scored.sort(key=lambda x: x["composite_score"], reverse=True)
+
+            # 순위 부여 및 상위 N개 선택
+            for i, pick in enumerate(scored[:top_n]):
+                pick["rank"] = i + 1
+
+            top = scored[:top_n]
+            logger.info(
+                f"[Top Picks] {len(recs)}개 BUY 중 상위 {len(top)}개 선정: "
+                + ", ".join(f"{p['ticker']}({p['composite_score']})" for p in top)
+            )
+            return top
 
     def get_recommendation_history(self, days: int = 30) -> list[dict]:
         """
