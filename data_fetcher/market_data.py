@@ -485,14 +485,15 @@ class MarketDataFetcher:
 
         # 2) 최근 AI 추천 종목 추가
         try:
-            from database.models import AIRecommendation
+            from database.models import AIRecommendation, Stock
             from database.connection import SessionLocal
             db = SessionLocal()
             try:
                 from datetime import timedelta
                 cutoff = datetime.now() - timedelta(days=7)
                 recs = (
-                    db.query(AIRecommendation.ticker)
+                    db.query(Stock.ticker)
+                    .join(AIRecommendation, AIRecommendation.stock_id == Stock.id)
                     .filter(AIRecommendation.created_at >= cutoff)
                     .distinct()
                     .all()

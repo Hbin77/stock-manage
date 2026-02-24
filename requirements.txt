@@ -12,6 +12,7 @@ APScheduler==3.10.4
 
 # AI 분석 (Google Gemini)
 google-genai>=1.0.0
+google-api-core>=2.14.0
 
 # 웹 대시보드
 streamlit==1.41.1
