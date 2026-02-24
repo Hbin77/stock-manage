@@ -3,6 +3,7 @@ AI 매수 추천 페이지
 오늘의 추천 + 이력/정확도를 표시합니다.
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -16,6 +17,11 @@ from analysis.backtester import backtester
 from config.settings import settings
 from database.connection import get_db
 from database.models import Stock
+from dashboard.utils import (
+    safe_call, safe_div, fmt_dollar, fmt_pct, fmt_score, fmt_count,
+    clear_analysis_cache,
+    CACHE_TTL_REALTIME, CACHE_TTL_MEDIUM, CACHE_TTL_LONG,
+)
 
 try:
     from config.tickers import TICKER_INDEX
@@ -30,58 +36,54 @@ def _get_index_badges(ticker: str) -> str:
         return ""
     indices = TICKER_INDEX.get(ticker, [])
     badges = []
-    if "NASDAQ100" in indices:
-        badges.append("`NASDAQ100`")
-    if "SP500" in indices:
-        badges.append("`S&P500`")
-    if "ETF" in indices:
-        badges.append("`ETF`")
-    if "MIDCAP" in indices:
-        badges.append("`MIDCAP`")
-    if "SMALLCAP" in indices:
-        badges.append("`SMALLCAP`")
+    for idx in ("NASDAQ100", "SP500", "ETF", "MIDCAP", "SMALLCAP"):
+        if idx in indices:
+            badges.append(f"`{idx}`")
     return " ".join(badges)
 
 
-@st.cache_data(ttl=60)
+# ── 캐시 함수 ──────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=CACHE_TTL_REALTIME)
 def _get_todays_recs():
-    return ai_analyzer.get_todays_recommendations()
+    return safe_call(ai_analyzer.get_todays_recommendations, default=[])
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_MEDIUM)
 def _get_history(days: int):
-    return ai_analyzer.get_recommendation_history(days=days)
+    return safe_call(ai_analyzer.get_recommendation_history, days, default=[])
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=CACHE_TTL_LONG)
 def _get_accuracy_stats(days: int):
-    return backtester.get_accuracy_stats(days=days)
+    return safe_call(backtester.get_accuracy_stats, days, default={})
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=CACHE_TTL_LONG)
 def _get_action_breakdown(days: int):
-    return backtester.get_action_breakdown(days=days)
+    return safe_call(backtester.get_action_breakdown, days, default=[])
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=CACHE_TTL_LONG)
 def _get_monthly_perf(months: int):
-    return backtester.get_monthly_performance(months=months)
+    return safe_call(backtester.get_monthly_performance, months, default=[])
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=CACHE_TTL_REALTIME)
 def _get_top_picks():
-    return ai_analyzer.get_top_picks(top_n=3)
+    return safe_call(ai_analyzer.get_top_picks, 3, default=[])
 
+
+# ── 메인 렌더 ──────────────────────────────────────────────────────────────
 
 def render():
     st.header("🤖 AI 매수 추천")
 
-    # ── Top 3 최종 추천 ─────────────────────────────────────────────────────
+    # ── Top 3 최종 추천 ─────────────────────────────────────────────────
     top_picks = _get_top_picks()
     recs_exist = bool(_get_todays_recs())
 
     if top_picks:
-        # BUY가 포함된지 확인
         has_buy = any(p["action"] in ("BUY", "STRONG_BUY") for p in top_picks)
         if has_buy:
             st.subheader("Top 3 매수 추천")
@@ -93,8 +95,8 @@ def render():
         cols = st.columns(min(len(top_picks), 3))
         for i, pick in enumerate(top_picks):
             with cols[i]:
-                medal = medal_map.get(pick["rank"], "")
-                action = pick["action"]
+                medal = medal_map.get(pick.get("rank", i + 1), "")
+                action = pick.get("action", "HOLD")
                 if action == "STRONG_BUY":
                     action_badge = "🟢🟢 STRONG BUY"
                 elif action == "BUY":
@@ -102,36 +104,34 @@ def render():
                 else:
                     action_badge = "🟡 HOLD"
 
-                st.markdown(f"### {medal} #{pick['rank']} {pick['ticker']}")
-                st.caption(f"{pick['name']} | {action_badge}")
+                st.markdown(f"### {medal} #{pick.get('rank', i+1)} {pick['ticker']}")
+                st.caption(f"{pick.get('name', '')} | {action_badge}")
 
-                # 상승률 계산
-                upside_pct = 0.0
-                if pick.get("target_price") and pick.get("price_at_recommendation") and pick["price_at_recommendation"] > 0:
-                    upside_pct = (pick["target_price"] - pick["price_at_recommendation"]) / pick["price_at_recommendation"] * 100
+                # 상승률 계산 — safe_div 사용
+                price_at = pick.get("price_at_recommendation") or 0
+                target = pick.get("target_price") or 0
+                upside_pct = safe_div(target - price_at, price_at) * 100 if price_at > 0 else 0.0
 
-                # Row 1: 종합점수, 신뢰도, R/R 비율
                 r1c1, r1c2, r1c3 = st.columns(3)
-                r1c1.metric("종합점수", f"{pick['composite_score']:.2f}")
-                r1c2.metric("신뢰도", f"{int(pick['confidence'] * 100)}%")
-                r1c3.metric("R/R 비율", f"{pick['risk_reward_ratio']:.2f}")
+                r1c1.metric("종합점수", fmt_score(pick.get("composite_score"), max_val=1, decimals=2))
+                r1c2.metric("신뢰도", fmt_pct(
+                    (pick.get("confidence") or 0) * 100, decimals=0, with_sign=False
+                ))
+                r1c3.metric("R/R 비율", f"{pick.get('risk_reward_ratio', 0):.2f}")
 
-                # Row 2: 기술/펀더멘탈/심리 점수
                 r2c1, r2c2, r2c3 = st.columns(3)
-                r2c1.metric("기술", f"{pick['technical_score']:.1f}/10")
-                r2c2.metric("펀더멘탈", f"{pick['fundamental_score']:.1f}/10")
-                r2c3.metric("심리", f"{pick['sentiment_score']:.1f}/10")
+                r2c1.metric("기술", fmt_score(pick.get("technical_score")))
+                r2c2.metric("펀더멘탈", fmt_score(pick.get("fundamental_score")))
+                r2c3.metric("심리", fmt_score(pick.get("sentiment_score")))
 
-                # Row 3: 현재가 -> 목표가
                 st.metric(
                     "현재가 → 목표가",
-                    f"${pick.get('target_price', 0):.2f}" if pick.get("target_price") else "N/A",
+                    fmt_dollar(pick.get("target_price")),
                     delta=f"+{upside_pct:.1f}%" if upside_pct > 0 else None,
                 )
 
-                # 간략 reasoning (100자)
-                reasoning_short = pick.get("reasoning", "")[:100]
-                if len(pick.get("reasoning", "")) > 100:
+                reasoning_short = (pick.get("reasoning") or "")[:100]
+                if len(pick.get("reasoning") or "") > 100:
                     reasoning_short += "..."
                 st.markdown(f"_{reasoning_short}_")
 
@@ -141,11 +141,11 @@ def render():
         st.info("오늘의 분석 결과가 없습니다. AI 분석을 실행하세요.")
         st.divider()
 
-    # ── 오늘의 추천 ──────────────────────────────────────────────────────────
+    # ── 오늘의 추천 ──────────────────────────────────────────────────────
     st.subheader("오늘의 추천")
     recs = _get_todays_recs()
 
-    # 분석 실행 버튼 (항상 표시)
+    # ── 분석 실행 버튼 (CRITICAL FIX) ────────────────────────────────────
     btn_col, info_col = st.columns([1, 3])
     with btn_col:
         run_analysis = st.button("🔍 AI 분석 실행", type="primary")
@@ -157,19 +157,24 @@ def render():
             st.caption(f"마지막 분석: {recs[0].get('recommendation_date', 'N/A')}")
 
     if run_analysis:
-        with st.spinner("전 종목 AI 분석 중... (병렬 5개 동시 분석, 약 1-2분 소요)"):
-            try:
-                ai_analyzer.analyze_all_watchlist()
-                st.cache_data.clear()
-                st.toast("분석 완료!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"분석 실패: {e}")
+        progress = st.progress(0, text="분석 준비 중...")
+        try:
+            progress.progress(10, text="AI 분석 중... (약 1-2분)")
+            results = ai_analyzer.analyze_all_watchlist()
+            buy_count = sum(1 for a in results.values() if a in ("BUY", "STRONG_BUY"))
+            progress.progress(100, text="완료!")
+            st.toast(f"분석 완료! BUY {buy_count}건 / 전체 {len(results)}건")
+            clear_analysis_cache()
+            time.sleep(0.5)
+            st.rerun()
+        except Exception as e:
+            progress.empty()
+            st.error(f"분석 실패: {e}")
 
     if not recs:
         st.info("오늘의 AI 분석 결과가 없습니다. 위 버튼으로 분석을 실행하세요.")
     else:
-        # ── 인덱스 그룹 필터 탭 ──────────────────────────────────────────────
+        # ── 인덱스 그룹 필터 탭 ──────────────────────────────────────────
         if _HAS_TICKER_INDEX:
             tab_all, tab_nasdaq, tab_sp500, tab_midcap, tab_smallcap = st.tabs(
                 ["전체", "NASDAQ100", "S&P500", "MIDCAP", "SMALLCAP"]
@@ -187,13 +192,11 @@ def render():
             else:
                 st.markdown(f"**매수 추천 없음** | HOLD: {len(hold_recs)}개")
 
-            # 매수 추천 카드
             for r in buy_recs:
                 action_icon = "🟢🟢" if r["action"] == "STRONG_BUY" else "🟢"
-                confidence_pct = int(r["confidence"] * 100)
+                confidence_pct = int((r.get("confidence") or 0) * 100)
                 badges = _get_index_badges(r["ticker"])
 
-                # weighted_score 계산
                 ts = r.get("technical_score") or 0.0
                 fs = r.get("fundamental_score") or 0.0
                 ss = r.get("sentiment_score") or 0.0
@@ -204,25 +207,26 @@ def render():
                     expanded=True,
                 ):
                     c1, c2, c3, c0 = st.columns(4)
-                    c1.metric("현재가", f"${r['price_at_recommendation']:.2f}" if r.get("price_at_recommendation") else "N/A")
-                    c2.metric("목표가", f"${r['target_price']:.2f}" if r.get("target_price") else "N/A")
-                    c3.metric("손절가", f"${r['stop_loss']:.2f}" if r.get("stop_loss") else "N/A")
+                    c1.metric("현재가", fmt_dollar(r.get("price_at_recommendation")))
+                    c2.metric("목표가", fmt_dollar(r.get("target_price")))
+                    c3.metric("손절가", fmt_dollar(r.get("stop_loss")))
                     c0.metric("가중점수", f"{w_score:.2f}/10")
 
                     c4, c5, c6 = st.columns(3)
-                    c4.metric("기술점수", f"{r['technical_score']:.1f}/10" if r.get("technical_score") else "N/A")
-                    c5.metric("펀더멘털", f"{r['fundamental_score']:.1f}/10" if r.get("fundamental_score") else "N/A")
-                    c6.metric("심리점수", f"{r['sentiment_score']:.1f}/10" if r.get("sentiment_score") else "N/A")
+                    c4.metric("기술점수", fmt_score(r.get("technical_score")))
+                    c5.metric("펀더멘털", fmt_score(r.get("fundamental_score")))
+                    c6.metric("심리점수", fmt_score(r.get("sentiment_score")))
 
-                    st.markdown(f"**AI 분석:** {r['reasoning']}")
-                    st.caption(f"분석 시각: {r['recommendation_date']}")
+                    st.markdown(f"**AI 분석:** {r.get('reasoning', '')}")
+                    st.caption(f"분석 시각: {r.get('recommendation_date', 'N/A')}")
 
-            # HOLD 종목 간략 표시
             if hold_recs:
                 with st.expander(f"⏸ HOLD 종목 ({len(hold_recs)}개)", expanded=False):
                     for r in hold_recs:
                         badges = _get_index_badges(r["ticker"])
-                        st.markdown(f"- **{r['ticker']}** {badges} ({int(r['confidence']*100)}%) — {r['reasoning'][:80]}...")
+                        reasoning = (r.get("reasoning") or "")[:80]
+                        conf = int((r.get("confidence") or 0) * 100)
+                        st.markdown(f"- **{r['ticker']}** {badges} ({conf}%) — {reasoning}...")
 
         with tab_all:
             st.caption("개별 주식만 분석됩니다 (ETF 제외)")
@@ -259,12 +263,17 @@ def render():
                 else:
                     st.info("SmallCap 추천 없음")
 
-        # ── 섹터 분포 ──────────────────────────────────────────────────────────
+        # ── 섹터 분포 ────────────────────────────────────────────────────
         tickers_in_recs = [r["ticker"] for r in recs]
         if tickers_in_recs:
-            with get_db() as db:
-                stocks = db.query(Stock.ticker, Stock.sector).filter(Stock.ticker.in_(tickers_in_recs)).all()
-                sector_map = {s.ticker: (s.sector or "Unknown") for s in stocks}
+            try:
+                with get_db() as db:
+                    stocks = db.query(Stock.ticker, Stock.sector).filter(
+                        Stock.ticker.in_(tickers_in_recs)
+                    ).all()
+                    sector_map = {s.ticker: (s.sector or "Unknown") for s in stocks}
+            except Exception:
+                sector_map = {}
 
             sector_counts: dict[str, int] = {}
             for t in tickers_in_recs:
@@ -289,7 +298,7 @@ def render():
 
     st.divider()
 
-    # ── 추천 이력 ─────────────────────────────────────────────────────────────
+    # ── 추천 이력 ──────────────────────────────────────────────────────────
     st.subheader("추천 이력")
 
     col1, col2 = st.columns([2, 1])
@@ -306,7 +315,7 @@ def render():
         st.info("이력 데이터가 없습니다.")
     else:
         if action_filter:
-            history = [h for h in history if h["action"] in action_filter]
+            history = [h for h in history if h.get("action") in action_filter]
 
         df = pd.DataFrame(history)
         if not df.empty:
@@ -332,13 +341,13 @@ def render():
             if not executed.empty and "outcome_return" in executed.columns:
                 executed = executed.dropna(subset=["outcome_return"])
                 profitable = executed[executed["outcome_return"] > 0]
-                accuracy = len(profitable) / len(executed) * 100 if len(executed) > 0 else 0
+                accuracy = safe_div(len(profitable), len(executed)) * 100
                 avg_return = executed["outcome_return"].mean()
 
                 acc_col1, acc_col2, acc_col3 = st.columns(3)
-                acc_col1.metric("실행된 추천", f"{len(executed)}건")
-                acc_col2.metric("성공률", f"{accuracy:.1f}%")
-                acc_col3.metric("평균 수익률", f"{avg_return:+.2f}%" if not pd.isna(avg_return) else "N/A")
+                acc_col1.metric("실행된 추천", fmt_count(len(executed)))
+                acc_col2.metric("성공률", fmt_pct(accuracy, with_sign=False))
+                acc_col3.metric("평균 수익률", fmt_pct(avg_return, decimals=2) if not pd.isna(avg_return) else "N/A")
 
             format_dict = {}
             if "신뢰도" in display_df.columns:
@@ -381,7 +390,7 @@ def render():
 
     st.divider()
 
-    # ── AI 성과 분석 ───────────────────────────────────────────────────────────
+    # ── AI 성과 분석 ──────────────────────────────────────────────────────
     st.subheader("📊 AI 성과 분석")
 
     perf_col1, perf_col2 = st.columns([2, 1])
@@ -397,12 +406,12 @@ def render():
         if st.button(
             "결과 업데이트",
             key="update_outcomes",
-            help="AI 추천 이후 실제 주가 변동을 조회하여 각 추천의 수익률(outcome_return)과 성공 여부를 DB에 기록합니다. 백테스팅 통계가 갱신됩니다.",
+            help="AI 추천 이후 실제 주가 변동을 조회하여 수익률을 DB에 기록합니다.",
         ):
             with st.spinner("백테스팅 결과 계산 중..."):
                 try:
                     n = backtester.update_outcomes()
-                    st.cache_data.clear()
+                    clear_analysis_cache()
                     st.toast(f"{n}건 업데이트 완료!")
                     st.rerun()
                 except Exception as e:
@@ -412,18 +421,17 @@ def render():
 
     # 5개 핵심 메트릭
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("전체 추천", f"{stats.get('total_recommendations', 0)}건")
-    m2.metric("결과 집계", f"{stats.get('with_outcomes', 0)}건")
+    m1.metric("전체 추천", fmt_count(stats.get("total_recommendations", 0)))
+    m2.metric("결과 집계", fmt_count(stats.get("with_outcomes", 0)))
 
     win_rate = stats.get("win_rate")
-    m3.metric("승률", f"{win_rate:.1f}%" if win_rate is not None else "N/A")
+    m3.metric("승률", fmt_pct(win_rate, with_sign=False) if win_rate is not None else "N/A")
 
     avg_ret = stats.get("avg_return")
-    _avg_ret_delta_color = "inverse" if (avg_ret is not None and avg_ret < 0) else "normal"
     m4.metric(
         "평균 수익률",
-        f"{avg_ret:+.2f}%" if avg_ret is not None else "N/A",
-        delta_color=_avg_ret_delta_color,
+        fmt_pct(avg_ret, decimals=2) if avg_ret is not None else "N/A",
+        delta_color="inverse" if (avg_ret is not None and avg_ret < 0) else "normal",
     )
 
     best_ticker = stats.get("best_ticker")
@@ -431,7 +439,7 @@ def render():
     m5.metric(
         "최고 수익 종목",
         best_ticker or "N/A",
-        delta=f"{best_ret:+.2f}%" if best_ret is not None else None,
+        delta=fmt_pct(best_ret, decimals=2) if best_ret is not None else None,
         delta_color="normal",
     )
 
@@ -463,7 +471,6 @@ def render():
             )
             st.plotly_chart(fig_bd, use_container_width=True)
 
-            # 액션별 상세 테이블
             bd_display = pd.DataFrame(breakdown).rename(columns={
                 "action": "액션", "count": "건수",
                 "win_rate": "승률(%)", "avg_return": "평균수익률(%)",
@@ -500,5 +507,7 @@ def render():
             st.caption(
                 f"Sharpe(근사): {sharpe:.3f}" if sharpe else "Sharpe: N/A"
             )
-            if worst_ticker:
-                st.caption(f"최저 수익: {worst_ticker} ({worst_ret:+.2f}%)" if worst_ret is not None else "")
+            if worst_ticker and worst_ret is not None:
+                st.caption(f"최저 수익: {worst_ticker} ({worst_ret:+.2f}%)")
+        else:
+            st.info("월별 데이터가 없습니다.")

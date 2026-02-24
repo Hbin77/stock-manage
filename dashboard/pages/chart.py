@@ -15,75 +15,79 @@ import pandas as pd
 from config.settings import settings
 from database.connection import get_db
 from database.models import PriceHistory, Stock, TechnicalIndicator
+from dashboard.utils import safe_div, CACHE_TTL_MEDIUM
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_MEDIUM)
 def _load_chart_data(ticker: str, days: int = 90):
-    """가격 + 지표 데이터를 300초 캐시로 조회합니다."""
-    with get_db() as db:
-        stock = db.query(Stock).filter(Stock.ticker == ticker).first()
-        if stock is None:
-            return None, None
+    """가격 + 지표 데이터를 캐시로 조회합니다."""
+    try:
+        with get_db() as db:
+            stock = db.query(Stock).filter(Stock.ticker == ticker).first()
+            if stock is None:
+                return None, None
 
-        price_rows = (
-            db.query(PriceHistory)
-            .filter(
-                PriceHistory.stock_id == stock.id,
-                PriceHistory.interval == "1d",
+            price_rows = (
+                db.query(PriceHistory)
+                .filter(
+                    PriceHistory.stock_id == stock.id,
+                    PriceHistory.interval == "1d",
+                )
+                .order_by(PriceHistory.timestamp.desc())
+                .limit(days)
+                .all()
             )
-            .order_by(PriceHistory.timestamp.desc())
-            .limit(days)
-            .all()
-        )
-        price_rows = list(reversed(price_rows))
+            price_rows = list(reversed(price_rows))
 
-        if not price_rows:
-            return None, None
+            if not price_rows:
+                return None, None
 
-        price_df = pd.DataFrame([
-            {
-                "date": r.timestamp,
-                "open": r.open,
-                "high": r.high,
-                "low": r.low,
-                "close": r.close,
-                "volume": r.volume,
-            }
-            for r in price_rows
-        ])
+            price_df = pd.DataFrame([
+                {
+                    "date": r.timestamp,
+                    "open": r.open,
+                    "high": r.high,
+                    "low": r.low,
+                    "close": r.close,
+                    "volume": r.volume,
+                }
+                for r in price_rows
+            ])
 
-        ind_rows = (
-            db.query(TechnicalIndicator)
-            .filter(TechnicalIndicator.stock_id == stock.id)
-            .order_by(TechnicalIndicator.date.desc())
-            .limit(days)
-            .all()
-        )
-        ind_rows = list(reversed(ind_rows))
+            ind_rows = (
+                db.query(TechnicalIndicator)
+                .filter(TechnicalIndicator.stock_id == stock.id)
+                .order_by(TechnicalIndicator.date.desc())
+                .limit(days)
+                .all()
+            )
+            ind_rows = list(reversed(ind_rows))
 
-        ind_df = pd.DataFrame([
-            {
-                "date": r.date,
-                "rsi_14": r.rsi_14,
-                "macd": r.macd,
-                "macd_signal": r.macd_signal,
-                "macd_hist": r.macd_hist,
-                "bb_upper": r.bb_upper,
-                "bb_middle": r.bb_middle,
-                "bb_lower": r.bb_lower,
-                "ma_20": r.ma_20,
-                "ma_50": r.ma_50,
-                "ma_200": r.ma_200,
-                "adx_14": r.adx_14,
-                "atr_14": r.atr_14,
-                "obv": r.obv,
-                "stoch_rsi_k": r.stoch_rsi_k,
-                "stoch_rsi_d": r.stoch_rsi_d,
-            }
-            for r in ind_rows
-        ])
+            ind_df = pd.DataFrame([
+                {
+                    "date": r.date,
+                    "rsi_14": r.rsi_14,
+                    "macd": r.macd,
+                    "macd_signal": r.macd_signal,
+                    "macd_hist": r.macd_hist,
+                    "bb_upper": r.bb_upper,
+                    "bb_middle": r.bb_middle,
+                    "bb_lower": r.bb_lower,
+                    "ma_20": r.ma_20,
+                    "ma_50": r.ma_50,
+                    "ma_200": r.ma_200,
+                    "adx_14": r.adx_14,
+                    "atr_14": r.atr_14,
+                    "obv": r.obv,
+                    "stoch_rsi_k": r.stoch_rsi_k,
+                    "stoch_rsi_d": r.stoch_rsi_d,
+                }
+                for r in ind_rows
+            ]) if ind_rows else pd.DataFrame()
 
-    return price_df, ind_df
+        return price_df, ind_df
+    except Exception:
+        return None, None
 
 
 def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> go.Figure:
@@ -107,7 +111,7 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
 
     dates = price_df["date"]
 
-    # ── Row 1: 캔들스틱 ──────────────────────────────────────────────────────
+    # ── Row 1: 캔들스틱 ──────────────────────────────────────────────────
     fig.add_trace(
         go.Candlestick(
             x=dates,
@@ -125,108 +129,110 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
     ind_dates = ind_df["date"] if not ind_df.empty else pd.Series(dtype="object")
 
     if not ind_df.empty:
-
         # 이동평균선
         for col_name, color, label in [
             ("ma_20", "#ffa726", "MA20"),
             ("ma_50", "#42a5f5", "MA50"),
             ("ma_200", "#ab47bc", "MA200"),
         ]:
-            series = ind_df[col_name].dropna()
-            if not series.empty:
+            if col_name in ind_df.columns:
+                series = ind_df[col_name].dropna()
+                if not series.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=ind_dates[ind_df[col_name].notna()],
+                            y=series,
+                            mode="lines",
+                            name=label,
+                            line=dict(color=color, width=1.2),
+                        ),
+                        row=1, col=1,
+                    )
+
+        # 볼린저 밴드
+        if "bb_upper" in ind_df.columns:
+            bb_mask = ind_df["bb_upper"].notna()
+            if bb_mask.any():
                 fig.add_trace(
                     go.Scatter(
-                        x=ind_dates[ind_df[col_name].notna()],
-                        y=series,
+                        x=ind_dates[bb_mask],
+                        y=ind_df.loc[bb_mask, "bb_upper"],
                         mode="lines",
-                        name=label,
-                        line=dict(color=color, width=1.2),
+                        name="BB Upper",
+                        line=dict(color="rgba(200,200,200,0.5)", width=1, dash="dot"),
+                    ),
+                    row=1, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=ind_dates[bb_mask],
+                        y=ind_df.loc[bb_mask, "bb_lower"],
+                        mode="lines",
+                        name="BB Lower",
+                        fill="tonexty",
+                        fillcolor="rgba(200,200,200,0.07)",
+                        line=dict(color="rgba(200,200,200,0.5)", width=1, dash="dot"),
                     ),
                     row=1, col=1,
                 )
 
-        # 볼린저 밴드
-        bb_mask = ind_df["bb_upper"].notna()
-        if bb_mask.any():
-            fig.add_trace(
-                go.Scatter(
-                    x=ind_dates[bb_mask],
-                    y=ind_df.loc[bb_mask, "bb_upper"],
-                    mode="lines",
-                    name="BB Upper",
-                    line=dict(color="rgba(200,200,200,0.5)", width=1, dash="dot"),
-                ),
-                row=1, col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=ind_dates[bb_mask],
-                    y=ind_df.loc[bb_mask, "bb_lower"],
-                    mode="lines",
-                    name="BB Lower",
-                    fill="tonexty",
-                    fillcolor="rgba(200,200,200,0.07)",
-                    line=dict(color="rgba(200,200,200,0.5)", width=1, dash="dot"),
-                ),
-                row=1, col=1,
-            )
+        # ── Row 2: MACD ─────────────────────────────────────────────────
+        if "macd" in ind_df.columns:
+            macd_mask = ind_df["macd"].notna()
+            if macd_mask.any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=ind_dates[macd_mask],
+                        y=ind_df.loc[macd_mask, "macd"],
+                        mode="lines",
+                        name="MACD",
+                        line=dict(color="#42a5f5", width=1.5),
+                    ),
+                    row=2, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=ind_dates[macd_mask],
+                        y=ind_df.loc[macd_mask, "macd_signal"],
+                        mode="lines",
+                        name="Signal",
+                        line=dict(color="#ffa726", width=1.5),
+                    ),
+                    row=2, col=1,
+                )
+                hist_vals = ind_df.loc[macd_mask, "macd_hist"]
+                colors = ["#26a69a" if v >= 0 else "#ef5350" for v in hist_vals]
+                fig.add_trace(
+                    go.Bar(
+                        x=ind_dates[macd_mask],
+                        y=hist_vals,
+                        name="MACD Hist",
+                        marker_color=colors,
+                        opacity=0.7,
+                    ),
+                    row=2, col=1,
+                )
 
-        # ── Row 2: MACD ───────────────────────────────────────────────────────
-        macd_mask = ind_df["macd"].notna()
-        if macd_mask.any():
-            fig.add_trace(
-                go.Scatter(
-                    x=ind_dates[macd_mask],
-                    y=ind_df.loc[macd_mask, "macd"],
-                    mode="lines",
-                    name="MACD",
-                    line=dict(color="#42a5f5", width=1.5),
-                ),
-                row=2, col=1,
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=ind_dates[macd_mask],
-                    y=ind_df.loc[macd_mask, "macd_signal"],
-                    mode="lines",
-                    name="Signal",
-                    line=dict(color="#ffa726", width=1.5),
-                ),
-                row=2, col=1,
-            )
-            hist_vals = ind_df.loc[macd_mask, "macd_hist"]
-            colors = ["#26a69a" if v >= 0 else "#ef5350" for v in hist_vals]
-            fig.add_trace(
-                go.Bar(
-                    x=ind_dates[macd_mask],
-                    y=hist_vals,
-                    name="MACD Hist",
-                    marker_color=colors,
-                    opacity=0.7,
-                ),
-                row=2, col=1,
-            )
+        # ── Row 3: RSI ──────────────────────────────────────────────────
+        if "rsi_14" in ind_df.columns:
+            rsi_mask = ind_df["rsi_14"].notna()
+            if rsi_mask.any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=ind_dates[rsi_mask],
+                        y=ind_df.loc[rsi_mask, "rsi_14"],
+                        mode="lines",
+                        name="RSI(14)",
+                        line=dict(color="#ec407a", width=1.5),
+                    ),
+                    row=3, col=1,
+                )
+                fig.add_hline(y=70, line_dash="dash", line_color="rgba(255,100,100,0.6)",
+                              annotation_text="과매수(70)", annotation_position="right", row=3, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="rgba(100,200,100,0.6)",
+                              annotation_text="과매도(30)", annotation_position="right", row=3, col=1)
 
-        # ── Row 3: RSI ────────────────────────────────────────────────────────
-        rsi_mask = ind_df["rsi_14"].notna()
-        if rsi_mask.any():
-            fig.add_trace(
-                go.Scatter(
-                    x=ind_dates[rsi_mask],
-                    y=ind_df.loc[rsi_mask, "rsi_14"],
-                    mode="lines",
-                    name="RSI(14)",
-                    line=dict(color="#ec407a", width=1.5),
-                ),
-                row=3, col=1,
-            )
-            # RSI 기준선 70/30
-            fig.add_hline(y=70, line_dash="dash", line_color="rgba(255,100,100,0.6)",
-                          annotation_text="과매수(70)", annotation_position="right", row=3, col=1)
-            fig.add_hline(y=30, line_dash="dash", line_color="rgba(100,200,100,0.6)",
-                          annotation_text="과매도(30)", annotation_position="right", row=3, col=1)
-
-    # ── Row 4: 거래량 ────────────────────────────────────────────────────────
+    # ── Row 4: 거래량 ──────────────────────────────────────────────────
     vol_colors = []
     for i in range(len(price_df)):
         if i == 0:
@@ -245,7 +251,7 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
         row=4, col=1,
     )
 
-    # ── Row 5: ADX ────────────────────────────────────────────────────────
+    # ── Row 5: ADX ──────────────────────────────────────────────────────
     if not ind_df.empty and "adx_14" in ind_df.columns:
         adx_mask = ind_df["adx_14"].notna()
         if adx_mask.any():
@@ -264,7 +270,7 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
             fig.add_hline(y=20, line_dash="dash", line_color="rgba(255,152,0,0.3)",
                           annotation_text="약한 추세(20)", annotation_position="right", row=5, col=1)
 
-    # ── Row 6: StochRSI ─────────────────────────────────────────────────────
+    # ── Row 6: StochRSI ────────────────────────────────────────────────
     if not ind_df.empty and "stoch_rsi_k" in ind_df.columns:
         srsi_k_mask = ind_df["stoch_rsi_k"].notna()
         if srsi_k_mask.any():
@@ -296,7 +302,7 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
             fig.add_hline(y=0.20, line_dash="dash", line_color="rgba(100,200,100,0.5)",
                           annotation_text="과매도(0.20)", annotation_position="right", row=6, col=1)
 
-    # ── Row 7: OBV ──────────────────────────────────────────────────────────
+    # ── Row 7: OBV ──────────────────────────────────────────────────────
     if not ind_df.empty and "obv" in ind_df.columns:
         obv_mask = ind_df["obv"].notna()
         if obv_mask.any():
@@ -313,7 +319,7 @@ def _build_chart(ticker: str, price_df: pd.DataFrame, ind_df: pd.DataFrame) -> g
                 row=7, col=1,
             )
 
-    # ── 레이아웃 ──────────────────────────────────────────────────────────────
+    # ── 레이아웃 ────────────────────────────────────────────────────────
     fig.update_layout(
         template="plotly_dark",
         height=1200,
@@ -350,7 +356,6 @@ def render():
             filtered = [t for t in all_tickers if search in t]
         else:
             filtered = all_tickers
-        # 검색 결과 없으면 전체 앞 30개 표시
         if search and not filtered:
             st.caption(f"'{search}' 검색 결과 없음 — 전체 목록에서 선택하세요")
         elif search:
@@ -370,31 +375,34 @@ def render():
         st.warning(f"[{ticker}] 가격 데이터가 없습니다. 먼저 `python main.py fetch` 를 실행하세요.")
         return
 
-    # 최신 지표 요약
+    # 최신 지표 요약 — safe_div 적용
     if ind_df is not None and not ind_df.empty:
         latest = ind_df.iloc[-1]
         c1, c2, c3, c4, c5, c6 = st.columns(6)
+
         rsi_val = latest.get("rsi_14")
-        c1.metric("RSI(14)", f"{rsi_val:.1f}" if rsi_val else "N/A")
+        c1.metric("RSI(14)", f"{rsi_val:.1f}" if rsi_val is not None else "N/A")
+
         macd_val = latest.get("macd")
         macd_sig = latest.get("macd_signal")
-        c2.metric("MACD", f"{macd_val:.3f}" if macd_val else "N/A",
-                  delta=f"vs Signal: {(macd_val - macd_sig):.3f}" if macd_val and macd_sig else None)
+        c2.metric(
+            "MACD",
+            f"{macd_val:.3f}" if macd_val is not None else "N/A",
+            delta=f"vs Signal: {(macd_val - macd_sig):.3f}" if macd_val is not None and macd_sig is not None else None,
+        )
+
         ma20 = latest.get("ma_20")
         current_close = price_df["close"].iloc[-1] if not price_df.empty else None
-        if ma20 and current_close:
-            pct_from_ma20 = (current_close - ma20) / ma20 * 100
-            c3.metric("vs MA20", f"{pct_from_ma20:+.2f}%")
-        else:
-            c3.metric("vs MA20", "N/A")
+        pct_from_ma20 = safe_div(current_close - ma20, ma20) * 100 if ma20 and current_close else None
+        c3.metric("vs MA20", f"{pct_from_ma20:+.2f}%" if pct_from_ma20 is not None else "N/A")
+
         ma50 = latest.get("ma_50")
-        if ma50 and current_close:
-            pct_from_ma50 = (current_close - ma50) / ma50 * 100
-            c4.metric("vs MA50", f"{pct_from_ma50:+.2f}%")
-        else:
-            c4.metric("vs MA50", "N/A")
+        pct_from_ma50 = safe_div(current_close - ma50, ma50) * 100 if ma50 and current_close else None
+        c4.metric("vs MA50", f"{pct_from_ma50:+.2f}%" if pct_from_ma50 is not None else "N/A")
+
         adx_val = latest.get("adx_14")
-        c5.metric("ADX(14)", f"{adx_val:.1f}" if adx_val else "N/A")
+        c5.metric("ADX(14)", f"{adx_val:.1f}" if adx_val is not None else "N/A")
+
         srsi_k_val = latest.get("stoch_rsi_k")
         c6.metric("StochRSI K", f"{srsi_k_val:.2f}" if srsi_k_val is not None else "N/A")
 

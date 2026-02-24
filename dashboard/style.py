@@ -24,14 +24,12 @@ def inject_custom_css() -> None:
             border-right: 1px solid #21262d;
         }
 
-        /* 사이드바 내 일반 텍스트를 약간 밝게 */
         [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] label,
         [data-testid="stSidebar"] span {
             color: #c9d1d9;
         }
 
-        /* 사이드바 종목 티커는 모노스페이스 */
         [data-testid="stSidebar"] code,
         [data-testid="stSidebar"] .ticker {
             font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
@@ -70,8 +68,31 @@ def inject_custom_css() -> None:
             font-size: 0.82rem;
         }
 
+        /* ── 카드 컨테이너 ───────────────────────────────────────────── */
+        .card {
+            background-color: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin-bottom: 12px;
+            transition: box-shadow 0.25s ease, border-color 0.25s ease;
+        }
+
+        .card:hover {
+            box-shadow: 0 4px 20px rgba(88, 166, 255, 0.12);
+            border-color: #58a6ff;
+        }
+
+        /* ── 프로그레스 라벨 ──────────────────────────────────────────── */
+        .progress-label {
+            font-size: 0.75rem;
+            color: #8b949e;
+            margin-bottom: 2px;
+            letter-spacing: 0.02em;
+        }
+
         /* ── 액션 뱃지 ────────────────────────────────────────────────── */
-        .badge-buy, .badge-sell, .badge-hold {
+        .badge-buy, .badge-sell, .badge-hold, .badge-strong-buy {
             display: inline-block;
             padding: 2px 10px;
             border-radius: 12px;
@@ -88,6 +109,13 @@ def inject_custom_css() -> None:
             border: 1px solid rgba(35, 197, 94, 0.4);
         }
 
+        .badge-strong-buy {
+            background-color: rgba(35, 197, 94, 0.25);
+            color: #22c55e;
+            border: 1px solid rgba(35, 197, 94, 0.6);
+            font-weight: 700;
+        }
+
         .badge-sell {
             background-color: rgba(239, 68, 68, 0.15);
             color: #ef4444;
@@ -98,6 +126,22 @@ def inject_custom_css() -> None:
             background-color: rgba(156, 163, 175, 0.15);
             color: #9ca3af;
             border: 1px solid rgba(156, 163, 175, 0.4);
+        }
+
+        /* ── 긴급도 클래스 ────────────────────────────────────────────── */
+        .urgency-high {
+            color: #ef4444 !important;
+            font-weight: 700;
+        }
+
+        .urgency-normal {
+            color: #f59e0b !important;
+            font-weight: 600;
+        }
+
+        .urgency-low {
+            color: #eab308 !important;
+            font-weight: 500;
         }
 
         /* ── 손익 텍스트 클래스 ──────────────────────────────────────── */
@@ -146,15 +190,6 @@ def inject_custom_css() -> None:
             background-color: #1c2128 !important;
         }
 
-        /* 작은 화면에서 테이블 폰트 추가 축소 */
-        @media (max-width: 768px) {
-            [data-testid="stDataFrame"] td,
-            [data-testid="stTable"] td,
-            .dataframe td {
-                font-size: 0.75rem !important;
-            }
-        }
-
         /* ── 공통 섹션 헤더 ──────────────────────────────────────────── */
         h1, h2, h3 {
             color: #e6edf3;
@@ -185,6 +220,39 @@ def inject_custom_css() -> None:
         [data-testid="stAlert"] {
             border-radius: 8px;
             border-left-width: 4px;
+        }
+
+        /* ── 모바일 반응형 ───────────────────────────────────────────── */
+        @media (max-width: 768px) {
+            [data-testid="stDataFrame"] td,
+            [data-testid="stTable"] td,
+            .dataframe td {
+                font-size: 0.75rem !important;
+                padding: 5px 8px !important;
+            }
+
+            [data-testid="stDataFrame"] th,
+            [data-testid="stTable"] th,
+            .dataframe th {
+                font-size: 0.70rem !important;
+                padding: 5px 8px !important;
+            }
+
+            [data-testid="metric-container"] {
+                padding: 10px 12px;
+            }
+
+            [data-testid="metric-container"] [data-testid="stMetricValue"] {
+                font-size: 1.2rem;
+            }
+
+            [data-testid="metric-container"] [data-testid="stMetricLabel"] p {
+                font-size: 0.70rem;
+            }
+
+            .card {
+                padding: 10px 12px;
+            }
         }
         </style>
         """,
