@@ -79,14 +79,29 @@ def render():
     # ── Top 3 최종 추천 ─────────────────────────────────────────────────────
     top_picks = _get_top_picks()
     if top_picks:
-        st.subheader("Top 3 최종 추천")
+        # BUY가 포함된지 확인
+        has_buy = any(p["action"] in ("BUY", "STRONG_BUY") for p in top_picks)
+        if has_buy:
+            st.subheader("Top 3 매수 추천")
+        else:
+            st.subheader("Top 3 유망 종목")
+            st.caption("현재 BUY 추천이 없어 HOLD 종목 중 가장 유망한 3개를 표시합니다")
+
         medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
         cols = st.columns(3)
         for i, pick in enumerate(top_picks):
             with cols[i]:
                 medal = medal_map.get(pick["rank"], "")
+                action = pick["action"]
+                if action == "STRONG_BUY":
+                    action_badge = "🟢🟢 STRONG BUY"
+                elif action == "BUY":
+                    action_badge = "🟢 BUY"
+                else:
+                    action_badge = "🟡 HOLD"
+
                 st.markdown(f"### {medal} #{pick['rank']} {pick['ticker']}")
-                st.caption(pick["name"])
+                st.caption(f"{pick['name']} | {action_badge}")
 
                 # 상승률 계산
                 upside_pct = 0.0

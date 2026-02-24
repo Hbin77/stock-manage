@@ -1274,7 +1274,8 @@ class AIAnalyzer:
 
     def get_top_picks(self, top_n: int = 3) -> list[dict]:
         """
-        오늘의 BUY/STRONG_BUY 추천 중 복합 점수 기준 상위 N개를 반환합니다.
+        오늘의 추천 중 복합 점수 기준 상위 N개를 반환합니다.
+        BUY/STRONG_BUY 우선, 없으면 전체(HOLD 포함)에서 상위 선정.
 
         복합 점수 = weighted_score * 0.40 + confidence * 10 * 0.25
                    + risk_reward_ratio * 0.20 + sentiment_score * 0.15
@@ -1285,7 +1286,8 @@ class AIAnalyzer:
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         with get_db() as db:
-            recs = (
+            # BUY/STRONG_BUY 먼저 조회
+            buy_recs = (
                 db.query(AIRecommendation)
                 .filter(
                     AIRecommendation.recommendation_date >= today_start,
@@ -1294,8 +1296,20 @@ class AIAnalyzer:
                 .all()
             )
 
+            # BUY가 없으면 전체 추천에서 상위 선정
+            if buy_recs:
+                recs = buy_recs
+                source = "BUY"
+            else:
+                recs = (
+                    db.query(AIRecommendation)
+                    .filter(AIRecommendation.recommendation_date >= today_start)
+                    .all()
+                )
+                source = "ALL"
+
             if not recs:
-                logger.info("[Top Picks] 오늘 BUY/STRONG_BUY 추천이 없습니다.")
+                logger.info("[Top Picks] 오늘 분석 결과가 없습니다.")
                 return []
 
             scored = []
@@ -1329,9 +1343,11 @@ class AIAnalyzer:
                     + ss * 0.15
                 )
 
-                # STRONG_BUY 보너스 (+0.5)
+                # STRONG_BUY 보너스 (+0.5), BUY 보너스 (+0.25)
                 if r.action == "STRONG_BUY":
                     composite += 0.5
+                elif r.action == "BUY":
+                    composite += 0.25
 
                 scored.append({
                     "rank": 0,
@@ -1360,7 +1376,7 @@ class AIAnalyzer:
 
             top = scored[:top_n]
             logger.info(
-                f"[Top Picks] {len(recs)}개 BUY 중 상위 {len(top)}개 선정: "
+                f"[Top Picks] {len(recs)}개({source}) 중 상위 {len(top)}개 선정: "
                 + ", ".join(f"{p['ticker']}({p['composite_score']})" for p in top)
             )
             return top
