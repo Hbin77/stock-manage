@@ -1257,18 +1257,21 @@ class AIAnalyzer:
             recs = (
                 db.query(AIRecommendation)
                 .filter(AIRecommendation.id == latest_ids.c.max_id)
-                .order_by(AIRecommendation.confidence.desc())
                 .all()
             )
 
             results = []
             for r in recs:
                 stock = db.query(Stock).filter(Stock.id == r.stock_id).first()
+                ts = r.technical_score or 0.0
+                fs = r.fundamental_score or 0.0
+                ss = r.sentiment_score or 0.0
                 results.append({
                     "ticker": stock.ticker if stock else "?",
                     "name": stock.name if stock else "?",
                     "action": r.action,
                     "confidence": r.confidence,
+                    "weighted_score": round(ts * 0.45 + fs * 0.30 + ss * 0.25, 2),
                     "target_price": r.target_price,
                     "stop_loss": r.stop_loss,
                     "reasoning": r.reasoning,
@@ -1278,6 +1281,10 @@ class AIAnalyzer:
                     "price_at_recommendation": r.price_at_recommendation,
                     "recommendation_date": r.recommendation_date.strftime("%Y-%m-%d %H:%M"),
                 })
+
+            # BUY/STRONG_BUY 먼저, 같은 action 내에서 가중점수 내림차순
+            action_order = {"STRONG_BUY": 0, "BUY": 1, "HOLD": 2}
+            results.sort(key=lambda x: (action_order.get(x["action"], 9), -x["weighted_score"]))
 
         return results
 
