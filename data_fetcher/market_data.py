@@ -402,38 +402,66 @@ class MarketDataFetcher:
 
             saved = 0
             for item in news_list:
-                # 중복 체크 (URL 기준)
-                url = item.get("link") or item.get("url")
+                # yfinance 새 구조: item["content"] 아래에 데이터가 중첩됨
+                content = item.get("content", {})
+
+                # URL: 새 구조 우선, 이전 구조 폴백
+                url = (
+                    content.get("clickThroughUrl", {}).get("url")
+                    or content.get("canonicalUrl", {}).get("url")
+                    or item.get("link")
+                    or item.get("url")
+                )
                 if not url:
-                    logger.debug(f"[{ticker}] URL 없는 뉴스 스킵: {item.get('title', 'N/A')[:50]}")
+                    title_preview = (content.get("title") or item.get("title", "N/A"))[:50]
+                    logger.debug(f"[{ticker}] URL 없는 뉴스 스킵: {title_preview}")
                     continue
                 existing = db.query(MarketNews).filter(MarketNews.url == url).first()
                 if existing:
                     continue
 
-                published_ts = item.get("providerPublishTime")
-                published_dt = (
-                    datetime.fromtimestamp(published_ts, tz=timezone.utc).replace(tzinfo=None)
-                    if published_ts
-                    else None
+                # 발행일: 새 구조(ISO 문자열) 우선, 이전 구조(timestamp) 폴백
+                published_dt = None
+                pub_date_str = content.get("pubDate")
+                if pub_date_str:
+                    try:
+                        published_dt = datetime.fromisoformat(
+                            pub_date_str.replace("Z", "+00:00")
+                        ).replace(tzinfo=None)
+                    except (ValueError, TypeError):
+                        pass
+                if published_dt is None:
+                    published_ts = item.get("providerPublishTime")
+                    if published_ts:
+                        published_dt = datetime.fromtimestamp(
+                            published_ts, tz=timezone.utc
+                        ).replace(tzinfo=None)
+
+                # 제목/요약/소스: 새 구조 우선, 이전 구조 폴백
+                title = content.get("title") or item.get("title", "")
+                summary = content.get("summary") or item.get("summary")
+                source = (
+                    content.get("provider", {}).get("displayName")
+                    or item.get("publisher")
                 )
 
                 # VADER 감성 점수 계산 (title + summary 합산)
                 # NOTE: VADER는 금융 도메인 특화가 아님. AI 분석 시 뉴스 제목 원문을 직접 참조하여 보완됨
                 sentiment_score = None
                 if _sia:
-                    text = item.get("title", "")
-                    if item.get("summary"):
-                        text += " " + item["summary"]
-                    scores = _sia.polarity_scores(text)
-                    sentiment_score = round(scores["compound"], 4)
+                    text = title or ""
+                    if summary:
+                        text += " " + summary
+                    if text.strip():
+                        scores = _sia.polarity_scores(text)
+                        sentiment_score = round(scores["compound"], 4)
 
                 news = MarketNews(
                     ticker=ticker,
-                    title=item.get("title", "")[:500],
-                    summary=item.get("summary"),
+                    title=(title or "")[:500],
+                    summary=summary,
                     url=url,
-                    source=item.get("publisher"),
+                    source=source,
                     published_at=published_dt,
                     sentiment=sentiment_score,
                 )

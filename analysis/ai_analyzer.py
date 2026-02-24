@@ -435,6 +435,23 @@ class AIAnalyzer:
                 vol_label = "ABOVE AVG" if vol_ratio > 1.2 else ("BELOW AVG" if vol_ratio < 0.8 else "NORMAL")
                 tech_lines.append(f"- Volume: {latest_vol:,.0f} vs 20d-MA:{vol_ma_20:,.0f} ({vol_ratio:.2f}x [{vol_label}])")
 
+            # OBV (On-Balance Volume)
+            obv = ind.get("obv")
+            if obv is not None:
+                tech_lines.append(f"- OBV: {obv:,.0f}")
+
+            # Stochastic RSI
+            stoch_k = ind.get("stoch_rsi_k")
+            stoch_d = ind.get("stoch_rsi_d")
+            if stoch_k is not None and stoch_d is not None:
+                stoch_label = "OVERSOLD" if stoch_k < 20 else ("OVERBOUGHT" if stoch_k > 80 else "NEUTRAL")
+                cross = ""
+                if stoch_k > stoch_d:
+                    cross = " (K above D — bullish)"
+                elif stoch_k < stoch_d:
+                    cross = " (K below D — bearish)"
+                tech_lines.append(f"- StochRSI: K={stoch_k:.1f} D={stoch_d:.1f} [{stoch_label}]{cross}")
+
             prompt_parts.extend(tech_lines + [""])
 
         # === FUNDAMENTALS (compact) ===
@@ -567,7 +584,7 @@ class AIAnalyzer:
         data.setdefault("entry_strategy", "MARKET")
         data.setdefault("time_horizon_days", 14)
 
-        # weighted_score 일관성 검증
+        # weighted_score 일관성 검증 (경고만, AI 의도 존중)
         ws = data.get("weighted_score")
         ts = data.get("technical_score")
         fs = data.get("fundamental_score")
@@ -575,7 +592,11 @@ class AIAnalyzer:
         if ws is not None and ts is not None and fs is not None and ss is not None:
             expected_ws = ts * 0.45 + fs * 0.30 + ss * 0.25
             if abs(ws - expected_ws) > 1.5:
-                logger.warning(f"weighted_score 불일치: {ws:.1f} vs 예상 {expected_ws:.1f}")
+                logger.warning(
+                    f"weighted_score 불일치: AI={ws:.1f} vs 공식={expected_ws:.1f} (AI 값 유지)"
+                )
+            # 공식 기반 값이 없을 때만 보정
+            if ws is None:
                 data["weighted_score"] = round(expected_ws, 2)
 
         # target_price / stop_loss 합리성 검증
@@ -583,15 +604,15 @@ class AIAnalyzer:
             tp = data.get("target_price")
             sl = data.get("stop_loss")
             if tp is not None:
-                if not (current_price * 0.95 <= tp <= current_price * 1.30):
+                if not (current_price * 1.01 <= tp <= current_price * 1.25):
                     logger.warning(
-                        f"target_price ${tp} 범위 초과 (현재가 ${current_price}의 0.95~1.30배) → None"
+                        f"target_price ${tp:.2f} 범위 초과 (현재가 ${current_price:.2f}의 +1%~+25%) → None"
                     )
                     data["target_price"] = None
             if sl is not None:
-                if not (current_price * 0.85 <= sl <= current_price * 0.99):
+                if not (current_price * 0.88 <= sl <= current_price * 0.99):
                     logger.warning(
-                        f"stop_loss ${sl} 범위 초과 (현재가 ${current_price}의 0.85~0.99배) → None"
+                        f"stop_loss ${sl:.2f} 범위 초과 (현재가 ${current_price:.2f}의 -12%~-1%) → None"
                     )
                     data["stop_loss"] = None
 
@@ -1180,6 +1201,24 @@ class AIAnalyzer:
         else:
             tickers = all_tickers
             logger.info(f"[AI 분석] 전체 종목 분석 시작: {tickers}")
+
+        # 오늘 이미 분석된 종목 제외 (중복 방지)
+        with get_db() as db:
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+            already_analyzed = set(
+                row[0] for row in db.query(Stock.ticker)
+                .join(AIRecommendation, AIRecommendation.stock_id == Stock.id)
+                .filter(AIRecommendation.recommendation_date >= today_start)
+                .all()
+            )
+            before_count = len(tickers)
+            tickers = [t for t in tickers if t not in already_analyzed]
+            if already_analyzed:
+                logger.info(f"[AI 분석] 오늘 이미 분석된 {before_count - len(tickers)}개 종목 제외 → {len(tickers)}개 분석 예정")
+
+        if not tickers:
+            logger.info("[AI 분석] 모든 종목이 오늘 이미 분석됨. 스킵합니다.")
+            return results
 
         import time
         import re as _re
