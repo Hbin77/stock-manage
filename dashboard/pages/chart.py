@@ -351,6 +351,10 @@ def render():
         else:
             filtered = all_tickers
         # 검색 결과 없으면 전체 앞 30개 표시
+        if search and not filtered:
+            st.caption(f"'{search}' 검색 결과 없음 — 전체 목록에서 선택하세요")
+        elif search:
+            st.caption(f"'{search}' 검색 결과: {len(filtered)}개 종목")
         options = filtered[:30] if filtered else all_tickers[:30]
         ticker = st.selectbox(
             f"종목 선택 ({len(filtered)}개 매칭)" if search else f"종목 선택 ({len(all_tickers)}개)",

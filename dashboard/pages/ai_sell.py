@@ -142,12 +142,12 @@ def render():
 
     if not signals:
         st.info("오늘의 매도 분석이 아직 실행되지 않았습니다.")
-        if st.button("🔍 지금 매도 신호 재분석", type="primary"):
+        if st.button("🔍 AI 매도 분석 실행", type="primary", key="sell_analyze_first"):
             with st.spinner("매도 신호 병렬 분석 중... (약 30초)"):
                 try:
                     sell_analyzer.analyze_all_holdings()
                     st.cache_data.clear()
-                    st.success("분석 완료!")
+                    st.toast("분석 완료!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"분석 실패: {e}")
@@ -191,12 +191,12 @@ def render():
 
     # 재분석 버튼
     st.divider()
-    if st.button("🔄 AI 매도 신호 재분석"):
+    if st.button("🔍 AI 매도 분석 실행", key="sell_analyze_bottom"):
         with st.spinner("매도 신호 병렬 분석 중... (약 30초)"):
             try:
                 sell_analyzer.analyze_all_holdings()
                 st.cache_data.clear()
-                st.success("재분석 완료!")
+                st.toast("재분석 완료!")
                 st.rerun()
             except Exception as e:
                 st.error(f"분석 실패: {e}")

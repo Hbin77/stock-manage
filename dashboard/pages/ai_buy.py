@@ -78,6 +78,8 @@ def render():
 
     # ── Top 3 최종 추천 ─────────────────────────────────────────────────────
     top_picks = _get_top_picks()
+    recs_exist = bool(_get_todays_recs())
+
     if top_picks:
         # BUY가 포함된지 확인
         has_buy = any(p["action"] in ("BUY", "STRONG_BUY") for p in top_picks)
@@ -88,7 +90,7 @@ def render():
             st.caption("현재 BUY 추천이 없어 HOLD 종목 중 가장 유망한 3개를 표시합니다")
 
         medal_map = {1: "🥇", 2: "🥈", 3: "🥉"}
-        cols = st.columns(3)
+        cols = st.columns(min(len(top_picks), 3))
         for i, pick in enumerate(top_picks):
             with cols[i]:
                 medal = medal_map.get(pick["rank"], "")
@@ -108,35 +110,35 @@ def render():
                 if pick.get("target_price") and pick.get("price_at_recommendation") and pick["price_at_recommendation"] > 0:
                     upside_pct = (pick["target_price"] - pick["price_at_recommendation"]) / pick["price_at_recommendation"] * 100
 
-                st.metric("종합점수", f"{pick['composite_score']:.2f}")
-                st.metric("신뢰도", f"{int(pick['confidence'] * 100)}%")
+                # Row 1: 종합점수, 신뢰도, R/R 비율
+                r1c1, r1c2, r1c3 = st.columns(3)
+                r1c1.metric("종합점수", f"{pick['composite_score']:.2f}")
+                r1c2.metric("신뢰도", f"{int(pick['confidence'] * 100)}%")
+                r1c3.metric("R/R 비율", f"{pick['risk_reward_ratio']:.2f}")
+
+                # Row 2: 기술/펀더멘탈/심리 점수
+                r2c1, r2c2, r2c3 = st.columns(3)
+                r2c1.metric("기술", f"{pick['technical_score']:.1f}/10")
+                r2c2.metric("펀더멘탈", f"{pick['fundamental_score']:.1f}/10")
+                r2c3.metric("심리", f"{pick['sentiment_score']:.1f}/10")
+
+                # Row 3: 현재가 -> 목표가
                 st.metric(
                     "현재가 → 목표가",
                     f"${pick.get('target_price', 0):.2f}" if pick.get("target_price") else "N/A",
                     delta=f"+{upside_pct:.1f}%" if upside_pct > 0 else None,
                 )
-                st.metric("손절가", f"${pick['stop_loss']:.2f}" if pick.get("stop_loss") else "N/A")
-                st.metric("R/R 비율", f"{pick['risk_reward_ratio']:.2f}")
 
-                # 기술/펀더멘탈/심리 점수 progress bar
-                st.markdown("**기술점수**")
-                st.progress(min(pick["technical_score"] / 10.0, 1.0))
-                st.caption(f"{pick['technical_score']:.1f}/10")
-
-                st.markdown("**펀더멘탈**")
-                st.progress(min(pick["fundamental_score"] / 10.0, 1.0))
-                st.caption(f"{pick['fundamental_score']:.1f}/10")
-
-                st.markdown("**심리점수**")
-                st.progress(min(pick["sentiment_score"] / 10.0, 1.0))
-                st.caption(f"{pick['sentiment_score']:.1f}/10")
-
-                # 간략 reasoning (150자)
-                reasoning_short = pick.get("reasoning", "")[:150]
-                if len(pick.get("reasoning", "")) > 150:
+                # 간략 reasoning (100자)
+                reasoning_short = pick.get("reasoning", "")[:100]
+                if len(pick.get("reasoning", "")) > 100:
                     reasoning_short += "..."
                 st.markdown(f"_{reasoning_short}_")
 
+        st.divider()
+    elif recs_exist:
+        st.subheader("Top 3 매수 추천")
+        st.info("오늘의 분석 결과가 없습니다. AI 분석을 실행하세요.")
         st.divider()
 
     # ── 오늘의 추천 ──────────────────────────────────────────────────────────
@@ -159,7 +161,7 @@ def render():
             try:
                 ai_analyzer.analyze_all_watchlist()
                 st.cache_data.clear()
-                st.success("분석 완료!")
+                st.toast("분석 완료!")
                 st.rerun()
             except Exception as e:
                 st.error(f"분석 실패: {e}")
@@ -401,7 +403,7 @@ def render():
                 try:
                     n = backtester.update_outcomes()
                     st.cache_data.clear()
-                    st.success(f"{n}건 업데이트 완료!")
+                    st.toast(f"{n}건 업데이트 완료!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"업데이트 실패: {e}")

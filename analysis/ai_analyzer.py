@@ -1241,13 +1241,22 @@ class AIAnalyzer:
     def get_todays_recommendations(self) -> list[dict]:
         """
         오늘 생성된 매수 추천 목록을 반환합니다 (대시보드용).
+        같은 종목에 대해 여러 번 분석한 경우 가장 최신 결과만 반환합니다.
         """
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         with get_db() as db:
+            from sqlalchemy import func
+            # 종목별 최신 추천 ID만 추출하는 서브쿼리
+            latest_ids = (
+                db.query(func.max(AIRecommendation.id).label("max_id"))
+                .filter(AIRecommendation.recommendation_date >= today_start)
+                .group_by(AIRecommendation.stock_id)
+                .subquery()
+            )
             recs = (
                 db.query(AIRecommendation)
-                .filter(AIRecommendation.recommendation_date >= today_start)
+                .filter(AIRecommendation.id == latest_ids.c.max_id)
                 .order_by(AIRecommendation.confidence.desc())
                 .all()
             )
@@ -1276,6 +1285,7 @@ class AIAnalyzer:
         """
         오늘의 추천 중 복합 점수 기준 상위 N개를 반환합니다.
         BUY/STRONG_BUY 우선, 없으면 전체(HOLD 포함)에서 상위 선정.
+        같은 종목에 대해 여러 번 분석한 경우 가장 최신 결과만 사용합니다.
 
         복합 점수 = weighted_score * 0.40 + confidence * 10 * 0.25
                    + risk_reward_ratio * 0.20 + sentiment_score * 0.15
@@ -1283,14 +1293,23 @@ class AIAnalyzer:
         Returns:
             상위 N개 추천 리스트 (딕셔너리)
         """
+        from sqlalchemy import func as sa_func
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
         with get_db() as db:
-            # BUY/STRONG_BUY 먼저 조회
+            # 종목별 최신 추천 ID만 추출하는 서브쿼리
+            latest_ids = (
+                db.query(sa_func.max(AIRecommendation.id).label("max_id"))
+                .filter(AIRecommendation.recommendation_date >= today_start)
+                .group_by(AIRecommendation.stock_id)
+                .subquery()
+            )
+
+            # BUY/STRONG_BUY 먼저 조회 (최신 결과만)
             buy_recs = (
                 db.query(AIRecommendation)
                 .filter(
-                    AIRecommendation.recommendation_date >= today_start,
+                    AIRecommendation.id == latest_ids.c.max_id,
                     AIRecommendation.action.in_(["BUY", "STRONG_BUY"]),
                 )
                 .all()
@@ -1303,7 +1322,7 @@ class AIAnalyzer:
             else:
                 recs = (
                     db.query(AIRecommendation)
-                    .filter(AIRecommendation.recommendation_date >= today_start)
+                    .filter(AIRecommendation.id == latest_ids.c.max_id)
                     .all()
                 )
                 source = "ALL"

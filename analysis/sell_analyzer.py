@@ -788,6 +788,7 @@ class SellAnalyzer:
     def get_active_sell_signals(self) -> list[dict]:
         """
         오늘의 매도 신호 목록을 반환합니다 (대시보드용).
+        같은 종목에 대해 여러 번 분석한 경우 가장 최신 결과만 반환합니다.
         SELL/STRONG_SELL이 먼저, urgency=HIGH가 우선 정렬됩니다.
         """
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -796,9 +797,17 @@ class SellAnalyzer:
         signal_order = {"STRONG_SELL": 0, "SELL": 1, "HOLD": 2}
 
         with get_db() as db:
+            from sqlalchemy import func as sa_func
+            # 종목별 최신 매도 신호 ID만 추출
+            latest_ids = (
+                db.query(sa_func.max(SellSignal.id).label("max_id"))
+                .filter(SellSignal.signal_date >= today_start)
+                .group_by(SellSignal.stock_id)
+                .subquery()
+            )
             sigs = (
                 db.query(SellSignal)
-                .filter(SellSignal.signal_date >= today_start)
+                .filter(SellSignal.id == latest_ids.c.max_id)
                 .all()
             )
 
