@@ -21,6 +21,8 @@ from dashboard.utils import (
     safe_call, safe_div, fmt_dollar, fmt_pct, fmt_score, fmt_count,
     clear_analysis_cache,
     CACHE_TTL_REALTIME, CACHE_TTL_MEDIUM, CACHE_TTL_LONG,
+    score_label, confidence_label, fmt_upside, html_score_bar,
+    action_badge_html, value_color,
 )
 
 try:
@@ -97,43 +99,58 @@ def render():
             with cols[i]:
                 medal = medal_map.get(pick.get("rank", i + 1), "")
                 action = pick.get("action", "HOLD")
-                if action == "STRONG_BUY":
-                    action_badge = "🟢🟢 STRONG BUY"
-                elif action == "BUY":
-                    action_badge = "🟢 BUY"
-                else:
-                    action_badge = "🟡 HOLD"
+                action_class = {
+                    "STRONG_BUY": "strong-buy", "BUY": "buy",
+                }.get(action, "hold")
 
-                st.markdown(f"### {medal} #{pick.get('rank', i+1)} {pick['ticker']}")
-                st.caption(f"{pick.get('name', '')} | {action_badge}")
-
-                # 상승률 계산 — safe_div 사용
                 price_at = pick.get("price_at_recommendation") or 0
                 target = pick.get("target_price") or 0
+                upside_str = fmt_upside(price_at, target)
                 upside_pct = safe_div(target - price_at, price_at) * 100 if price_at > 0 else 0.0
+                upside_cls = "upside-positive" if upside_pct >= 0 else "upside-negative"
 
-                r1c1, r1c2, r1c3 = st.columns(3)
-                r1c1.metric("종합점수", fmt_score(pick.get("composite_score"), max_val=1, decimals=2))
-                r1c2.metric("신뢰도", fmt_pct(
-                    (pick.get("confidence") or 0) * 100, decimals=0, with_sign=False
-                ))
-                r1c3.metric("R/R 비율", f"{pick.get('risk_reward_ratio', 0):.2f}")
+                confidence_val = pick.get("confidence") or 0
+                conf_pct = int(confidence_val * 100)
+                conf_lbl = confidence_label(confidence_val)
+                rr = pick.get("risk_reward_ratio", 0) or 0
 
-                r2c1, r2c2, r2c3 = st.columns(3)
-                r2c1.metric("기술", fmt_score(pick.get("technical_score")))
-                r2c2.metric("펀더멘탈", fmt_score(pick.get("fundamental_score")))
-                r2c3.metric("심리", fmt_score(pick.get("sentiment_score")))
+                ts = pick.get("technical_score")
+                fs = pick.get("fundamental_score")
+                ss = pick.get("sentiment_score")
+                cs = pick.get("composite_score")
 
-                st.metric(
-                    "현재가 → 목표가",
-                    fmt_dollar(pick.get("target_price")),
-                    delta=f"+{upside_pct:.1f}%" if upside_pct > 0 else None,
-                )
+                card_html = f"""
+                <div class="top-pick-card {action_class}">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span style="font-size:1.2rem;font-weight:700;color:#e6edf3;">
+                            {medal} #{pick.get('rank', i+1)} {pick['ticker']}
+                        </span>
+                        {action_badge_html(action)}
+                    </div>
+                    <div style="font-size:0.8rem;color:#8b949e;margin-bottom:10px;">
+                        {pick.get('name', '')}
+                    </div>
+                    <div style="margin-bottom:10px;text-align:center;">
+                        <span class="upside-badge {upside_cls}">{upside_str}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:#8b949e;margin-bottom:8px;">
+                        <span>현재가 <b style="color:#e6edf3">{fmt_dollar(price_at)}</b></span>
+                        <span>목표가 <b style="color:#23c55e">{fmt_dollar(target)}</b></span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:0.78rem;color:#8b949e;margin-bottom:12px;">
+                        <span>신뢰도 <b style="color:#e6edf3">{conf_pct}%</b> ({conf_lbl})</span>
+                        <span>R/R <b style="color:#e6edf3">{rr:.2f}</b></span>
+                    </div>
+                    {html_score_bar(ts, 10, "#58a6ff", "기술")}
+                    {html_score_bar(fs, 10, "#23c55e", "펀더멘탈")}
+                    {html_score_bar(ss, 10, "#eab308", "심리")}
+                    {html_score_bar(cs, 10, "#a78bfa", "종합")}
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
 
-                reasoning_short = (pick.get("reasoning") or "")[:100]
-                if len(pick.get("reasoning") or "") > 100:
-                    reasoning_short += "..."
-                st.markdown(f"_{reasoning_short}_")
+                with st.expander("AI 분석 근거", expanded=False):
+                    st.markdown(pick.get("reasoning") or "분석 근거 없음")
 
         st.divider()
     elif recs_exist:
@@ -174,14 +191,21 @@ def render():
     if not recs:
         st.info("오늘의 AI 분석 결과가 없습니다. 위 버튼으로 분석을 실행하세요.")
     else:
-        # ── 인덱스 그룹 필터 탭 ──────────────────────────────────────────
+        # ── 인덱스 필터 (selectbox) ─────────────────────────────────────
+        index_options = ["전체"]
         if _HAS_TICKER_INDEX:
-            tab_all, tab_nasdaq, tab_sp500, tab_midcap, tab_smallcap = st.tabs(
-                ["전체", "NASDAQ100", "S&P500", "MIDCAP", "SMALLCAP"]
-            )
+            index_options += ["NASDAQ100", "S&P500", "MIDCAP", "SMALLCAP"]
+        selected_index = st.selectbox("인덱스 필터", index_options, key="index_filter")
+
+        # 선택된 인덱스로 필터링
+        if selected_index == "전체" or not _HAS_TICKER_INDEX:
+            filtered_recs = recs
         else:
-            tab_all = st.container()
-            tab_nasdaq = tab_sp500 = tab_midcap = tab_smallcap = None
+            idx_key = "SP500" if selected_index == "S&P500" else selected_index
+            filtered_recs = [
+                r for r in recs
+                if idx_key in TICKER_INDEX.get(r["ticker"], [])
+            ]
 
         def _render_recs(filtered_recs: list[dict]):
             buy_recs = [r for r in filtered_recs if r["action"] in ("BUY", "STRONG_BUY")]
@@ -193,75 +217,74 @@ def render():
                 st.markdown(f"**매수 추천 없음** | HOLD: {len(hold_recs)}개")
 
             for r in buy_recs:
-                action_icon = "🟢🟢" if r["action"] == "STRONG_BUY" else "🟢"
                 confidence_pct = int((r.get("confidence") or 0) * 100)
                 badges = _get_index_badges(r["ticker"])
 
                 ts = r.get("technical_score") or 0.0
                 fs = r.get("fundamental_score") or 0.0
                 ss = r.get("sentiment_score") or 0.0
-                w_score = ts * 0.45 + fs * 0.30 + ss * 0.25
+                w_score = r.get("weighted_score") or (ts * 0.45 + fs * 0.30 + ss * 0.25)
+
+                price_at = r.get("price_at_recommendation") or 0
+                target_p = r.get("target_price") or 0
+                stop_loss_p = r.get("stop_loss") or 0
+
+                upside_pct = safe_div(target_p - price_at, price_at) * 100 if price_at > 0 else 0.0
+                downside_pct = safe_div(stop_loss_p - price_at, price_at) * 100 if price_at > 0 else 0.0
+                rr_ratio = abs(safe_div(upside_pct, downside_pct)) if downside_pct != 0 else 0.0
+
+                # 3-pillar formula string
+                pillar_str = (
+                    f"기술({ts:.1f})*0.45 + 펀더({fs:.1f})*0.30 + 심리({ss:.1f})*0.25 = {w_score:.2f}"
+                )
+                # upside/downside/R:R string
+                updown_str = (
+                    f"목표 {'+' if upside_pct >= 0 else ''}{upside_pct:.1f}% | "
+                    f"손절 {downside_pct:.1f}% | R/R {rr_ratio:.2f}"
+                )
 
                 with st.expander(
-                    f"{action_icon} **{r['ticker']}** — {r['action']} ({confidence_pct}%)  {badges}",
+                    f"{action_badge_html(r['action'])}  **{r['ticker']}** ({confidence_pct}%)  {badges}",
                     expanded=True,
                 ):
                     c1, c2, c3, c0 = st.columns(4)
-                    c1.metric("현재가", fmt_dollar(r.get("price_at_recommendation")))
-                    c2.metric("목표가", fmt_dollar(r.get("target_price")))
-                    c3.metric("손절가", fmt_dollar(r.get("stop_loss")))
+                    c1.metric("현재가", fmt_dollar(price_at))
+                    c2.metric("목표가", fmt_dollar(target_p))
+                    c3.metric("손절가", fmt_dollar(stop_loss_p))
                     c0.metric("가중점수", f"{w_score:.2f}/10")
 
-                    c4, c5, c6 = st.columns(3)
-                    c4.metric("기술점수", fmt_score(r.get("technical_score")))
-                    c5.metric("펀더멘털", fmt_score(r.get("fundamental_score")))
-                    c6.metric("심리점수", fmt_score(r.get("sentiment_score")))
+                    # 3-pillar score bars
+                    pillar_html = f"""
+                    <div style="margin:8px 0;">
+                        {html_score_bar(ts, 10, "#58a6ff", "기술(x0.45)")}
+                        {html_score_bar(fs, 10, "#23c55e", "펀더(x0.30)")}
+                        {html_score_bar(ss, 10, "#eab308", "심리(x0.25)")}
+                    </div>
+                    <div style="font-size:0.78rem;color:#8b949e;font-family:'JetBrains Mono',monospace;margin:4px 0;">
+                        {pillar_str}
+                    </div>
+                    <div style="font-size:0.78rem;color:#c9d1d9;font-family:'JetBrains Mono',monospace;margin:4px 0;">
+                        {updown_str}
+                    </div>
+                    """
+                    st.markdown(pillar_html, unsafe_allow_html=True)
 
                     st.markdown(f"**AI 분석:** {r.get('reasoning', '')}")
                     st.caption(f"분석 시각: {r.get('recommendation_date', 'N/A')}")
 
             if hold_recs:
-                with st.expander(f"⏸ HOLD 종목 ({len(hold_recs)}개)", expanded=False):
+                with st.expander(f"HOLD 종목 ({len(hold_recs)}개)", expanded=False):
                     for r in hold_recs:
                         badges = _get_index_badges(r["ticker"])
                         reasoning = (r.get("reasoning") or "")[:80]
                         conf = int((r.get("confidence") or 0) * 100)
-                        st.markdown(f"- **{r['ticker']}** {badges} ({conf}%) — {reasoning}...")
+                        st.markdown(f"- **{r['ticker']}** {badges} ({conf}%) -- {reasoning}...")
 
-        with tab_all:
-            st.caption("개별 주식만 분석됩니다 (ETF 제외)")
-            _render_recs(recs)
-
-        if _HAS_TICKER_INDEX and tab_nasdaq and tab_sp500:
-            with tab_nasdaq:
-                nasdaq_recs = [r for r in recs if "NASDAQ100" in TICKER_INDEX.get(r["ticker"], [])]
-                if nasdaq_recs:
-                    _render_recs(nasdaq_recs)
-                else:
-                    st.info("NASDAQ100 종목 추천 없음")
-
-            with tab_sp500:
-                sp500_recs = [r for r in recs if "SP500" in TICKER_INDEX.get(r["ticker"], [])]
-                if sp500_recs:
-                    _render_recs(sp500_recs)
-                else:
-                    st.info("S&P500 종목 추천 없음")
-
-        if _HAS_TICKER_INDEX and tab_midcap:
-            with tab_midcap:
-                midcap_recs = [r for r in recs if "MIDCAP" in TICKER_INDEX.get(r["ticker"], [])]
-                if midcap_recs:
-                    _render_recs(midcap_recs)
-                else:
-                    st.info("MidCap 추천 없음")
-
-        if _HAS_TICKER_INDEX and tab_smallcap:
-            with tab_smallcap:
-                smallcap_recs = [r for r in recs if "SMALLCAP" in TICKER_INDEX.get(r["ticker"], [])]
-                if smallcap_recs:
-                    _render_recs(smallcap_recs)
-                else:
-                    st.info("SmallCap 추천 없음")
+        st.caption("개별 주식만 분석됩니다 (ETF 제외)")
+        if filtered_recs:
+            _render_recs(filtered_recs)
+        else:
+            st.info(f"{selected_index} 종목 추천 없음")
 
         # ── 섹터 분포 ────────────────────────────────────────────────────
         tickers_in_recs = [r["ticker"] for r in recs]
@@ -381,7 +404,7 @@ def render():
                 page_df = display_df
 
             st.dataframe(
-                page_df.style.format(format_dict),
+                page_df.style.format(format_dict, na_rep="-"),
                 use_container_width=True,
                 hide_index=True,
             )

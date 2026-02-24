@@ -13,6 +13,11 @@ def inject_custom_css() -> None:
     st.markdown(
         """
         <style>
+        /* ── Streamlit 자동 멀티페이지 네비게이션 숨김 ─────────────────── */
+        [data-testid="stSidebarNav"] {
+            display: none !important;
+        }
+
         /* ── 전역 폰트 & 배경 ───────────────────────────────────────────── */
         html, body, [class*="css"] {
             font-family: 'Pretendard', 'Noto Sans KR', 'Inter', sans-serif;
@@ -220,6 +225,367 @@ def inject_custom_css() -> None:
         [data-testid="stAlert"] {
             border-radius: 8px;
             border-left-width: 4px;
+        }
+
+        /* ── Score Bar ──────────────────────────────────────────────── */
+        .score-bar-container {
+            margin-bottom: 8px;
+        }
+
+        .score-bar-label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 3px;
+        }
+
+        .score-bar-label {
+            font-size: 0.75rem;
+            color: #8b949e;
+            font-weight: 500;
+        }
+
+        .score-bar-value {
+            font-size: 0.78rem;
+            color: #e6edf3;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .score-bar-track {
+            position: relative;
+            width: 100%;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: visible;
+        }
+
+        .score-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.4s ease;
+        }
+
+        .score-bar-threshold {
+            position: absolute;
+            top: -2px;
+            width: 2px;
+            height: 12px;
+            background: #e6edf3;
+            border-radius: 1px;
+        }
+
+        .score-bar-threshold-label {
+            position: absolute;
+            top: -16px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.6rem;
+            color: #8b949e;
+            white-space: nowrap;
+        }
+
+        /* ── 해석 라벨 ──────────────────────────────────────────────── */
+        .interp-label {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 500;
+            margin-top: 2px;
+            padding: 1px 6px;
+            border-radius: 4px;
+        }
+
+        .interp-very-strong {
+            color: #23c55e;
+            background: rgba(35, 197, 94, 0.12);
+        }
+
+        .interp-strong {
+            color: #58a6ff;
+            background: rgba(88, 166, 255, 0.12);
+        }
+
+        .interp-moderate {
+            color: #eab308;
+            background: rgba(234, 179, 8, 0.12);
+        }
+
+        .interp-weak {
+            color: #f59e0b;
+            background: rgba(245, 158, 11, 0.12);
+        }
+
+        .interp-very-weak {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.12);
+        }
+
+        /* ── 상승률 뱃지 ────────────────────────────────────────────── */
+        .upside-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .upside-positive {
+            color: #23c55e;
+            background: rgba(35, 197, 94, 0.15);
+            border: 1px solid rgba(35, 197, 94, 0.4);
+        }
+
+        .upside-negative {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
+
+        /* ── 긴급도 헤더 ────────────────────────────────────────────── */
+        .urgency-header {
+            padding: 10px 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            border-left: 4px solid;
+        }
+
+        .urgency-header-high {
+            background: linear-gradient(135deg, rgba(239, 68, 68, 0.20), rgba(239, 68, 68, 0.08));
+            border-left-color: #ef4444;
+            color: #fca5a5;
+        }
+
+        .urgency-header-normal {
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.18), rgba(245, 158, 11, 0.06));
+            border-left-color: #f59e0b;
+            color: #fcd34d;
+        }
+
+        .urgency-header-low {
+            background: linear-gradient(135deg, rgba(107, 114, 128, 0.15), rgba(107, 114, 128, 0.05));
+            border-left-color: #6b7280;
+            color: #d1d5db;
+        }
+
+        /* ── 출구전략 뱃지 ──────────────────────────────────────────── */
+        .exit-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+        }
+
+        .exit-immediate {
+            background: rgba(239, 68, 68, 0.20);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.5);
+        }
+
+        .exit-limit {
+            background: rgba(245, 158, 11, 0.20);
+            color: #fcd34d;
+            border: 1px solid rgba(245, 158, 11, 0.5);
+        }
+
+        .exit-scale-out {
+            background: rgba(234, 179, 8, 0.18);
+            color: #fde047;
+            border: 1px solid rgba(234, 179, 8, 0.5);
+        }
+
+        .exit-hold-stop {
+            background: rgba(35, 197, 94, 0.15);
+            color: #86efac;
+            border: 1px solid rgba(35, 197, 94, 0.5);
+        }
+
+        /* ── Top Pick 카드 ──────────────────────────────────────────── */
+        .top-pick-card {
+            background-color: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin-bottom: 12px;
+            border-left: 4px solid #6b7280;
+            transition: box-shadow 0.25s ease;
+        }
+
+        .top-pick-card:hover {
+            box-shadow: 0 4px 20px rgba(88, 166, 255, 0.12);
+        }
+
+        .top-pick-card.strong-buy {
+            border-left-color: #23c55e;
+        }
+
+        .top-pick-card.buy {
+            border-left-color: #58a6ff;
+        }
+
+        .top-pick-card.hold {
+            border-left-color: #eab308;
+        }
+
+        /* ── 감성 뱃지(대형) ────────────────────────────────────────── */
+        .sentiment-badge-lg {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .sentiment-positive-lg {
+            color: #23c55e;
+            background: rgba(35, 197, 94, 0.15);
+            border: 1px solid rgba(35, 197, 94, 0.4);
+        }
+
+        .sentiment-negative-lg {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
+
+        .sentiment-neutral-lg {
+            color: #eab308;
+            background: rgba(234, 179, 8, 0.12);
+            border: 1px solid rgba(234, 179, 8, 0.4);
+        }
+
+        /* ── 알림 유형 뱃지 ──────────────────────────────────────────── */
+        .alert-type-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+
+        .alert-stop-loss {
+            background: rgba(239, 68, 68, 0.18);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
+
+        .alert-target {
+            background: rgba(35, 197, 94, 0.15);
+            color: #23c55e;
+            border: 1px solid rgba(35, 197, 94, 0.4);
+        }
+
+        .alert-trailing {
+            background: rgba(88, 166, 255, 0.15);
+            color: #58a6ff;
+            border: 1px solid rgba(88, 166, 255, 0.4);
+        }
+
+        .alert-volume {
+            background: rgba(245, 158, 11, 0.18);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+        }
+
+        /* ── 가중치 시각화 ──────────────────────────────────────────── */
+        .pillar-container {
+            display: flex;
+            width: 100%;
+            height: 24px;
+            border-radius: 6px;
+            overflow: hidden;
+            margin: 4px 0;
+        }
+
+        .pillar-segment {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.68rem;
+            font-weight: 600;
+            color: #e6edf3;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+        .pillar-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.7rem;
+            color: #8b949e;
+            margin-top: 2px;
+        }
+
+        /* ── 실현손익 미리보기 ──────────────────────────────────────── */
+        .pnl-preview-profit {
+            background: rgba(35, 197, 94, 0.12);
+            border: 1px solid rgba(35, 197, 94, 0.3);
+            border-radius: 8px;
+            padding: 10px 16px;
+            color: #23c55e;
+            font-weight: 600;
+        }
+
+        .pnl-preview-loss {
+            background: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 8px;
+            padding: 10px 16px;
+            color: #ef4444;
+            font-weight: 600;
+        }
+
+        /* ── 기술 신호 요약 카드 ────────────────────────────────────── */
+        .signal-summary {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            font-size: 0.85rem;
+        }
+
+        .signal-summary .signal-buy {
+            color: #23c55e;
+            font-weight: 600;
+        }
+
+        .signal-summary .signal-sell {
+            color: #ef4444;
+            font-weight: 600;
+        }
+
+        .signal-summary .signal-neutral {
+            color: #8b949e;
+        }
+
+        /* ── 감성 분포 바 ──────────────────────────────────────────── */
+        .sentiment-dist-bar {
+            display: flex;
+            width: 100%;
+            height: 20px;
+            border-radius: 6px;
+            overflow: hidden;
+            margin: 6px 0;
+        }
+
+        .sentiment-dist-bar .seg-positive {
+            background: #23c55e;
+        }
+
+        .sentiment-dist-bar .seg-neutral {
+            background: #eab308;
+        }
+
+        .sentiment-dist-bar .seg-negative {
+            background: #ef4444;
         }
 
         /* ── 모바일 반응형 ───────────────────────────────────────────── */

@@ -52,15 +52,15 @@ def _load_news(days: int) -> list[dict]:
 
 
 def _sentiment_badge(sentiment: float | None) -> str:
-    """감성 점수를 배지 텍스트로 변환"""
+    """감성 점수를 HTML 배지로 변환"""
     if sentiment is None:
-        return "⚪ N/A"
+        return '<span class="sentiment-badge-lg sentiment-neutral-lg">N/A</span>'
     if sentiment > 0.2:
-        return f"🟢 {sentiment:+.2f}"
+        return f'<span class="sentiment-badge-lg sentiment-positive-lg">▲ {sentiment:+.2f}</span>'
     elif sentiment < -0.2:
-        return f"🔴 {sentiment:+.2f}"
+        return f'<span class="sentiment-badge-lg sentiment-negative-lg">▼ {sentiment:+.2f}</span>'
     else:
-        return f"🟡 {sentiment:+.2f}"
+        return f'<span class="sentiment-badge-lg sentiment-neutral-lg">● {sentiment:+.2f}</span>'
 
 
 def _render_news_list(news_list: list[dict], search_input: str):
@@ -85,6 +85,27 @@ def _render_news_list(news_list: list[dict], search_input: str):
         c2.metric("평균 감성", f"{avg_sent:+.3f}")
         c3.metric("긍정 뉴스", f"{pos_count}건")
         c4.metric("부정 뉴스", f"{neg_count}건")
+
+        # ── 감성 분포 바 ─────────────────────────────────────────────
+        total = len(sentiments)
+        neutral_count = total - pos_count - neg_count
+        pos_pct = pos_count / total * 100
+        neu_pct = neutral_count / total * 100
+        neg_pct = neg_count / total * 100
+        st.markdown(
+            f'<div class="sentiment-dist-bar">'
+            f'<div class="seg-positive" style="width:{pos_pct}%;" title="긍정 {pos_count}건"></div>'
+            f'<div class="seg-neutral" style="width:{neu_pct}%;" title="중립 {neutral_count}건"></div>'
+            f'<div class="seg-negative" style="width:{neg_pct}%;" title="부정 {neg_count}건"></div>'
+            f'</div>'
+            f'<div style="display:flex;justify-content:space-between;font-size:0.7rem;color:#8b949e;">'
+            f'<span>긍정 {pos_count}건 ({pos_pct:.0f}%)</span>'
+            f'<span>중립 {neutral_count}건 ({neu_pct:.0f}%)</span>'
+            f'<span>부정 {neg_count}건 ({neg_pct:.0f}%)</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
         st.divider()
 
     # ── 뉴스 목록 ─────────────────────────────────────────────────────
@@ -96,7 +117,7 @@ def _render_news_list(news_list: list[dict], search_input: str):
 
             with col_badge:
                 st.markdown(f"**{n['ticker']}**")
-                st.markdown(sentiment_text)
+                st.markdown(sentiment_text, unsafe_allow_html=True)
                 st.caption(n["published_at"])
 
             with col_content:

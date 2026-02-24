@@ -19,8 +19,26 @@ from portfolio.portfolio_manager import portfolio_manager
 from dashboard.utils import (
     safe_call, safe_div, fmt_dollar, fmt_pct, fmt_count,
     clear_portfolio_cache,
+    alert_type_badge_html,
     CACHE_TTL_REALTIME, CACHE_TTL_MEDIUM, CACHE_TTL_STATIC,
 )
+
+
+# ── 섹터 색상 고정 맵 ────────────────────────────────────────────────────
+SECTOR_COLORS = {
+    "Technology": "#58a6ff",
+    "Healthcare": "#23c55e",
+    "Financial Services": "#f59e0b",
+    "Consumer Cyclical": "#a78bfa",
+    "Communication Services": "#ec4899",
+    "Industrials": "#6b7280",
+    "Energy": "#ef4444",
+    "Utilities": "#06b6d4",
+    "Consumer Defensive": "#84cc16",
+    "Real Estate": "#f97316",
+    "Basic Materials": "#8b5cf6",
+    "Unknown": "#374151",
+}
 
 
 # ── 캐시 함수 ──────────────────────────────────────────────────────────────
@@ -131,7 +149,7 @@ def render():
                     "평가금액": "${:,.0f}",
                     "평가손익($)": "${:+,.2f}",
                     "수익률(%)": "{:+.2f}%",
-                })
+                }, na_rep="-")
                 .background_gradient(subset=["수익률(%)"], cmap="RdYlGn", vmin=-20, vmax=20),
                 use_container_width=True,
                 hide_index=True,
@@ -221,6 +239,20 @@ def render():
             info_c1.metric("보유 수량", f"{selected_holding['quantity']:.4f}주")
             info_c2.metric("평균 매수가", fmt_dollar(selected_holding["avg_buy_price"]))
 
+            st.markdown("**빠른 수량 선택:**")
+            qty_cols = st.columns(4)
+            quick_qty = selected_holding["quantity"]
+            if qty_cols[0].button("25%", key="sell_25"):
+                st.session_state["quick_sell_qty"] = quick_qty * 0.25
+            if qty_cols[1].button("50%", key="sell_50"):
+                st.session_state["quick_sell_qty"] = quick_qty * 0.50
+            if qty_cols[2].button("75%", key="sell_75"):
+                st.session_state["quick_sell_qty"] = quick_qty * 0.75
+            if qty_cols[3].button("전량", key="sell_100"):
+                st.session_state["quick_sell_qty"] = quick_qty
+
+            default_sell_qty = st.session_state.get("quick_sell_qty", float(selected_holding["quantity"]))
+
             with st.form("sell_form", clear_on_submit=True):
                 fs1, fs2, fs3 = st.columns(3)
                 quantity_sell = fs1.number_input(
@@ -229,7 +261,7 @@ def render():
                     max_value=float(selected_holding["quantity"]),
                     step=0.0001,
                     format="%.4f",
-                    value=float(selected_holding["quantity"]),
+                    value=float(default_sell_qty),
                 )
                 price_sell = fs2.number_input(
                     "매도 단가 ($)",
@@ -243,7 +275,10 @@ def render():
                 note_sell = st.text_input("메모 (선택)", key="sell_note")
 
                 preview_pnl = (quantity_sell * price_sell - fee_sell) - (selected_holding["avg_buy_price"] * quantity_sell)
-                st.info(f"예상 실현손익: **${preview_pnl:+,.2f}**")
+                if preview_pnl >= 0:
+                    st.markdown(f'<div class="pnl-preview-profit">예상 실현손익: ${preview_pnl:+,.2f}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="pnl-preview-loss">예상 실현손익: ${preview_pnl:+,.2f}</div>', unsafe_allow_html=True)
 
                 submitted_sell = st.form_submit_button("매도 등록", type="primary")
 
@@ -355,12 +390,20 @@ def render():
             "trigger_price": "발화가($)", "message": "메시지", "is_sent": "전송",
         }
         ah_display.rename(columns=col_map, inplace=True)
+        st.markdown(
+            "유형 범례: " + " ".join([
+                alert_type_badge_html("STOP_LOSS"),
+                alert_type_badge_html("TARGET_PRICE"),
+                alert_type_badge_html("TRAILING_STOP"),
+                alert_type_badge_html("VOLUME_SURGE"),
+            ]),
+            unsafe_allow_html=True
+        )
         st.dataframe(
             ah_display.style.apply(_style_alert_row, axis=1),
             use_container_width=True,
             hide_index=True,
         )
-        st.caption("행 색상: 🔴 빨강 = STOP_LOSS(손절 발화) | 🟢 초록 = TARGET_PRICE(목표가 달성)")
 
     st.divider()
 
@@ -400,7 +443,7 @@ def render():
                     "총액($)": "${:,.2f}",
                     "수수료($)": "${:.2f}",
                     "실현손익($)": lambda x: f"${x:+,.2f}" if pd.notna(x) else "-",
-                }),
+                }, na_rep="-"),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -473,6 +516,8 @@ def render():
                     values="value",
                     template="plotly_dark",
                     hole=0.35,
+                    color="sector",
+                    color_discrete_map=SECTOR_COLORS,
                 )
                 fig_sec.update_traces(textposition="inside", textinfo="percent+label")
                 fig_sec.update_layout(
@@ -484,7 +529,7 @@ def render():
 
                 sec_display = sec_df.rename(columns={"sector": "섹터", "value": "평가금액($)", "pct": "비중(%)"})
                 st.dataframe(
-                    sec_display.style.format({"평가금액($)": "${:,.0f}", "비중(%)": "{:.1f}%"}),
+                    sec_display.style.format({"평가금액($)": "${:,.0f}", "비중(%)": "{:.1f}%"}, na_rep="-"),
                     use_container_width=True,
                     hide_index=True,
                 )

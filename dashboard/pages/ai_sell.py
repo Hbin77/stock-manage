@@ -15,6 +15,7 @@ from portfolio.portfolio_manager import portfolio_manager
 from dashboard.utils import (
     safe_call, safe_div, fmt_dollar, fmt_pct, fmt_score, fmt_count,
     clear_analysis_cache, urgency_icon, signal_icon, exit_strategy_label,
+    sell_pressure_label, html_score_bar, exit_strategy_badge_html,
     CACHE_TTL_REALTIME,
 )
 
@@ -34,7 +35,7 @@ def _get_holdings():
 # ── 헬퍼 함수 ──────────────────────────────────────────────────────────────
 
 def _render_score_bars(s: dict):
-    """스코어(technical, position_risk, fundamental, sell_pressure) progress bar 표시"""
+    """스코어(technical, position_risk, fundamental, sell_pressure) HTML bar 표시"""
     tech = s.get("technical_score")
     pos_risk = s.get("position_risk_score")
     fund = s.get("fundamental_score")
@@ -45,20 +46,34 @@ def _render_score_bars(s: dict):
         return
 
     st.markdown("**스코어 분석:**")
-    cols = st.columns(4)
 
-    score_items = [
-        (cols[0], "기술적 악화", tech),
-        (cols[1], "포지션 리스크", pos_risk),
-        (cols[2], "펀더멘털/심리", fund),
-        (cols[3], "매도 압력", sell_p),
-    ]
-    for col, label, val in score_items:
-        if val is not None:
-            col.caption(f"{label}: {val:.1f}/10")
-            col.progress(min(val / 10.0, 1.0))
-        else:
-            col.caption(f"{label}: N/A")
+    # sell_pressure 색상 결정
+    if sell_p is not None and sell_p >= 7.0:
+        sp_color = "#ef4444"
+    elif sell_p is not None and sell_p >= 5.5:
+        sp_color = "#f59e0b"
+    else:
+        sp_color = "#58a6ff"
+
+    cols = st.columns(4)
+    with cols[0]:
+        st.markdown(html_score_bar(tech, 10, "#58a6ff", "기술적 악화"), unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown(html_score_bar(pos_risk, 10, "#58a6ff", "포지션 리스크"), unsafe_allow_html=True)
+    with cols[2]:
+        st.markdown(html_score_bar(fund, 10, "#58a6ff", "펀더멘털/심리"), unsafe_allow_html=True)
+    with cols[3]:
+        st.markdown(
+            html_score_bar(sell_p, 10, sp_color, "매도 압력", thresholds=[(5.5, "SELL"), (7.0, "S.SELL")]),
+            unsafe_allow_html=True,
+        )
+
+    # 매도 압력 해석 텍스트
+    sp_label, sp_color_text = sell_pressure_label(sell_p)
+    st.markdown(
+        f'<span style="font-size:0.8rem;color:{sp_color_text};font-weight:600;">매도 압력 해석: {sp_label}</span>',
+        unsafe_allow_html=True,
+    )
 
 
 def _render_exit_strategy(s: dict):
@@ -66,8 +81,7 @@ def _render_exit_strategy(s: dict):
     exit_strat = s.get("exit_strategy")
     if not exit_strat:
         return
-    label, icon = exit_strategy_label(exit_strat)
-    st.markdown(f"**매도 전략:** {icon} {label}")
+    st.markdown(f"**출구 전략:** {exit_strategy_badge_html(exit_strat)}", unsafe_allow_html=True)
 
 
 def _render_summary(signals: list[dict], total_holdings: int):
@@ -75,8 +89,10 @@ def _render_summary(signals: list[dict], total_holdings: int):
     sell_count = sum(1 for s in signals if s.get("signal") in ("SELL", "STRONG_SELL"))
     confidences = [s["confidence"] for s in signals if s.get("confidence") is not None]
     avg_conf = safe_div(sum(confidences), len(confidences))
+    sell_pressures = [s["sell_pressure"] for s in signals if s.get("sell_pressure") is not None]
+    avg_sp = safe_div(sum(sell_pressures), len(sell_pressures))
 
-    mc1, mc2, mc3 = st.columns(3)
+    mc1, mc2, mc3, mc4 = st.columns(4)
     mc1.metric("전체 보유 종목", fmt_count(total_holdings, unit="개"))
     mc2.metric(
         "SELL 신호",
@@ -85,6 +101,26 @@ def _render_summary(signals: list[dict], total_holdings: int):
         delta_color="inverse" if sell_count > 0 else "off",
     )
     mc3.metric("평균 신뢰도", fmt_pct(avg_conf * 100, decimals=0, with_sign=False))
+    sp_label, sp_color = sell_pressure_label(avg_sp)
+    mc4.metric("평균 매도 압력", fmt_score(avg_sp, max_val=10, decimals=1))
+
+    # 긴급도 분포
+    urgency_counts = {"HIGH": 0, "NORMAL": 0, "LOW": 0}
+    for s in signals:
+        urg = s.get("urgency", "LOW")
+        if urg in urgency_counts:
+            urgency_counts[urg] += 1
+        else:
+            urgency_counts["LOW"] += 1
+    st.markdown(
+        f'<div style="text-align:center;font-size:0.85rem;color:#8b949e;margin-top:4px;">'
+        f'긴급도 분포 — '
+        f'<span style="color:#ef4444;font-weight:600;">HIGH: {urgency_counts["HIGH"]}</span> | '
+        f'<span style="color:#f59e0b;font-weight:600;">NORMAL: {urgency_counts["NORMAL"]}</span> | '
+        f'<span style="color:#eab308;font-weight:600;">LOW: {urgency_counts["LOW"]}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ── 메인 렌더 ──────────────────────────────────────────────────────────────
@@ -148,6 +184,15 @@ def render():
                 f"(수익률: {pnl_pct:+.1f}%, 신뢰도: {conf}%)",
                 expanded=True,
             ):
+                urgency = s.get("urgency", "LOW")
+                urgency_css = {"HIGH": "urgency-header-high", "NORMAL": "urgency-header-normal"}.get(urgency, "urgency-header-low")
+                st.markdown(
+                    f'<div class="urgency-header {urgency_css}">'
+                    f'{urgency_icon(urgency)} 긴급도: {urgency} | {signal_icon(s.get("signal", ""))} {s.get("signal", "")}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
                 c1, c2, c3 = st.columns(3)
                 c1.metric("현재가", fmt_dollar(s.get("current_price")))
                 c2.metric("제안 매도가", fmt_dollar(s.get("suggested_sell_price")))

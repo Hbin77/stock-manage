@@ -96,3 +96,147 @@ def exit_strategy_label(strategy: str) -> tuple[str, str]:
         "HOLD_WITH_STOP": ("손절가 설정 후 보유", "🟢"),
     }
     return strategies.get(strategy, (strategy or "N/A", "⚪"))
+
+
+# ── 점수 해석 함수 ────────────────────────────────────────────────
+
+def score_label(value: float | None, max_val: float = 10) -> tuple[str, str]:
+    """(라벨, CSS클래스) 반환"""
+    if value is None:
+        return ("N/A", "interp-weak")
+    ratio = value / max_val
+    if ratio >= 0.8:
+        return ("매우 강함", "interp-very-strong")
+    elif ratio >= 0.6:
+        return ("강함", "interp-strong")
+    elif ratio >= 0.4:
+        return ("보통", "interp-moderate")
+    elif ratio >= 0.2:
+        return ("약함", "interp-weak")
+    else:
+        return ("매우 약함", "interp-very-weak")
+
+
+def confidence_label(conf_0to1: float | None) -> str:
+    """신뢰도 해석 라벨"""
+    if conf_0to1 is None:
+        return "N/A"
+    if conf_0to1 >= 0.90:
+        return "매우 높음"
+    elif conf_0to1 >= 0.75:
+        return "높음"
+    elif conf_0to1 >= 0.55:
+        return "보통"
+    else:
+        return "낮음"
+
+
+def fmt_upside(current: float | None, target: float | None) -> str:
+    """상승률 포맷터"""
+    if not current or not target or current <= 0:
+        return "N/A"
+    pct = (target - current) / current * 100
+    if pct >= 0:
+        return f"+{pct:.1f}% 상승 여력"
+    else:
+        return f"{pct:.1f}%"
+
+
+def sell_pressure_label(sp: float | None) -> tuple[str, str]:
+    """매도 압력 해석 (라벨, 색상)"""
+    if sp is None:
+        return ("N/A", "#8b949e")
+    if sp >= 7.0:
+        return ("STRONG SELL 영역", "#ef4444")
+    elif sp >= 5.5:
+        return ("SELL 영역", "#f59e0b")
+    elif sp >= 3.5:
+        return ("관찰", "#eab308")
+    else:
+        return ("안정", "#23c55e")
+
+
+def rsi_signal(value: float | None) -> tuple[str, str]:
+    """RSI 신호 (라벨, 색상)"""
+    if value is None:
+        return ("N/A", "#8b949e")
+    if value < 30:
+        return ("과매도", "#23c55e")
+    elif value > 70:
+        return ("과매수", "#ef4444")
+    else:
+        return ("중립", "#8b949e")
+
+
+def html_score_bar(
+    value: float | None,
+    max_val: float = 10,
+    color: str = "#58a6ff",
+    label: str = "",
+    thresholds: list[tuple[float, str]] | None = None,
+) -> str:
+    """임계값 수직선 포함 HTML 프로그레스 바"""
+    if value is None:
+        return f'<div class="score-bar-container"><span class="score-bar-label">{label}: N/A</span></div>'
+
+    pct = min(max(value / max_val * 100, 0), 100)
+    lbl, css_cls = score_label(value, max_val)
+
+    threshold_html = ""
+    if thresholds:
+        for th_val, th_label in thresholds:
+            th_pct = min(max(th_val / max_val * 100, 0), 100)
+            threshold_html += (
+                f'<div class="score-bar-threshold" style="left:{th_pct}%;">'
+                f'<span class="score-bar-threshold-label">{th_label}</span></div>'
+            )
+
+    return (
+        f'<div class="score-bar-container">'
+        f'<div class="score-bar-label-row">'
+        f'<span class="score-bar-label">{label}</span>'
+        f'<span class="score-bar-value">{value:.1f}/{max_val:.0f}</span>'
+        f'</div>'
+        f'<div class="score-bar-track">'
+        f'<div class="score-bar-fill" style="width:{pct}%;background:{color};"></div>'
+        f'{threshold_html}'
+        f'</div>'
+        f'<span class="interp-label {css_cls}">{lbl}</span>'
+        f'</div>'
+    )
+
+
+def exit_strategy_badge_html(strategy: str | None) -> str:
+    """색상 코딩된 출구전략 뱃지 HTML"""
+    badge_map = {
+        "IMMEDIATE": ("즉시 매도", "exit-immediate"),
+        "LIMIT_SELL": ("지정가 매도", "exit-limit"),
+        "SCALE_OUT": ("분할 매도", "exit-scale-out"),
+        "HOLD_WITH_STOP": ("손절가 보유", "exit-hold-stop"),
+    }
+    if not strategy or strategy not in badge_map:
+        return f'<span class="exit-badge exit-hold-stop">{strategy or "N/A"}</span>'
+    label, css = badge_map[strategy]
+    return f'<span class="exit-badge {css}">{label}</span>'
+
+
+def value_color(value: float | None, thresholds: list[tuple[float, str]]) -> str:
+    """값에 따라 CSS 색상 반환. thresholds는 내림차순 [(경계, 색상), ...]"""
+    if value is None:
+        return "#8b949e"
+    for boundary, color in thresholds:
+        if value >= boundary:
+            return color
+    return thresholds[-1][1] if thresholds else "#8b949e"
+
+
+def alert_type_badge_html(alert_type: str) -> str:
+    """알림 유형 색상 뱃지 HTML"""
+    badge_map = {
+        "STOP_LOSS": ("손절", "alert-stop-loss"),
+        "TARGET_PRICE": ("목표가", "alert-target"),
+        "TRAILING_STOP": ("추적손절", "alert-trailing"),
+        "VOLUME_SURGE": ("거래량", "alert-volume"),
+    }
+    label, css = badge_map.get(alert_type, (alert_type, "alert-stop-loss"))
+    return f'<span class="alert-type-badge {css}">{label}</span>'

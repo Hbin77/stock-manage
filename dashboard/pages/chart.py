@@ -15,7 +15,7 @@ import pandas as pd
 from config.settings import settings
 from database.connection import get_db
 from database.models import PriceHistory, Stock, TechnicalIndicator
-from dashboard.utils import safe_div, CACHE_TTL_MEDIUM
+from dashboard.utils import safe_div, rsi_signal, CACHE_TTL_MEDIUM
 
 
 @st.cache_data(ttl=CACHE_TTL_MEDIUM)
@@ -367,7 +367,9 @@ def render():
             key="chart_ticker",
         )
     with col3:
-        days = st.selectbox("기간", [30, 60, 90, 180, 365], index=2, key="chart_days")
+        period_map = {"1개월": 30, "3개월": 90, "6개월": 180, "1년": 365, "2년": 730, "5년": 1825}
+        period_label = st.selectbox("기간", list(period_map.keys()), index=2, key="chart_period")
+        days = period_map[period_label]
 
     price_df, ind_df = _load_chart_data(ticker, days)
 
@@ -375,20 +377,31 @@ def render():
         st.warning(f"[{ticker}] 가격 데이터가 없습니다. 먼저 `python main.py fetch` 를 실행하세요.")
         return
 
-    # 최신 지표 요약 — safe_div 적용
+    # 최신 지표 요약 — safe_div 적용 + 신호 해석
+    rsi_val = None
+    macd_val = None
+    macd_sig = None
+    adx_val = None
+    srsi_k_val = None
+
     if ind_df is not None and not ind_df.empty:
         latest = ind_df.iloc[-1]
         c1, c2, c3, c4, c5, c6 = st.columns(6)
 
         rsi_val = latest.get("rsi_14")
-        c1.metric("RSI(14)", f"{rsi_val:.1f}" if rsi_val is not None else "N/A")
+        rsi_lbl, _ = rsi_signal(rsi_val) if rsi_val is not None else ("N/A", "")
+        c1.metric("RSI(14)", f"{rsi_val:.1f}" if rsi_val is not None else "N/A", delta=rsi_lbl if rsi_val is not None else None, delta_color="off")
 
         macd_val = latest.get("macd")
         macd_sig = latest.get("macd_signal")
+        macd_delta = None
+        if macd_val is not None and macd_sig is not None:
+            macd_delta = "골든크로스 영역" if macd_val > macd_sig else "데드크로스 영역"
         c2.metric(
             "MACD",
             f"{macd_val:.3f}" if macd_val is not None else "N/A",
-            delta=f"vs Signal: {(macd_val - macd_sig):.3f}" if macd_val is not None and macd_sig is not None else None,
+            delta=macd_delta,
+            delta_color="off",
         )
 
         ma20 = latest.get("ma_20")
@@ -401,10 +414,63 @@ def render():
         c4.metric("vs MA50", f"{pct_from_ma50:+.2f}%" if pct_from_ma50 is not None else "N/A")
 
         adx_val = latest.get("adx_14")
-        c5.metric("ADX(14)", f"{adx_val:.1f}" if adx_val is not None else "N/A")
+        adx_delta = None
+        if adx_val is not None:
+            if adx_val > 25:
+                adx_delta = "강한 추세"
+            elif adx_val > 20:
+                adx_delta = "약한 추세"
+            else:
+                adx_delta = "추세 없음"
+        c5.metric("ADX(14)", f"{adx_val:.1f}" if adx_val is not None else "N/A", delta=adx_delta, delta_color="off")
 
         srsi_k_val = latest.get("stoch_rsi_k")
-        c6.metric("StochRSI K", f"{srsi_k_val:.2f}" if srsi_k_val is not None else "N/A")
+        srsi_delta = None
+        if srsi_k_val is not None:
+            if srsi_k_val > 0.80:
+                srsi_delta = "과매수"
+            elif srsi_k_val < 0.20:
+                srsi_delta = "과매도"
+            else:
+                srsi_delta = "중립"
+        c6.metric("StochRSI K", f"{srsi_k_val:.2f}" if srsi_k_val is not None else "N/A", delta=srsi_delta, delta_color="off")
+
+    # ── 기술 신호 요약 카드 ──────────────────────────────────────────
+    signals = []
+    # RSI
+    if rsi_val is not None:
+        rsi_lbl, rsi_col = rsi_signal(rsi_val)
+        css = "signal-buy" if rsi_col == "#23c55e" else ("signal-sell" if rsi_col == "#ef4444" else "signal-neutral")
+        signals.append(f'<span class="{css}">RSI {rsi_lbl}({rsi_val:.0f})</span>')
+    # MACD
+    if macd_val is not None and macd_sig is not None:
+        if macd_val > macd_sig:
+            signals.append('<span class="signal-buy">MACD 골든크로스</span>')
+        else:
+            signals.append('<span class="signal-sell">MACD 데드크로스</span>')
+    # ADX
+    if adx_val is not None:
+        if adx_val > 25:
+            signals.append(f'<span class="signal-buy">추세 강함(ADX {adx_val:.0f})</span>')
+        elif adx_val < 20:
+            signals.append(f'<span class="signal-neutral">추세 없음(ADX {adx_val:.0f})</span>')
+    # StochRSI
+    if srsi_k_val is not None:
+        if srsi_k_val > 0.80:
+            signals.append(f'<span class="signal-sell">StochRSI 과매수({srsi_k_val:.2f})</span>')
+        elif srsi_k_val < 0.20:
+            signals.append(f'<span class="signal-buy">StochRSI 과매도({srsi_k_val:.2f})</span>')
+
+    # Count buy/sell signals
+    buy_count = sum(1 for s in signals if "signal-buy" in s)
+    sell_count = sum(1 for s in signals if "signal-sell" in s)
+    overall = "매수 신호" if buy_count > sell_count else ("매도 신호" if sell_count > buy_count else "중립")
+
+    if signals:
+        st.markdown(
+            f'<div class="signal-summary">[{overall}] {" | ".join(signals)}</div>',
+            unsafe_allow_html=True,
+        )
 
     # 차트 출력
     fig = _build_chart(ticker, price_df, ind_df if ind_df is not None else pd.DataFrame())

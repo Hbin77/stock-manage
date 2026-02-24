@@ -1202,23 +1202,14 @@ class AIAnalyzer:
             tickers = all_tickers
             logger.info(f"[AI 분석] 전체 종목 분석 시작: {tickers}")
 
-        # 오늘 이미 분석된 종목 제외 (중복 방지)
+        # 오늘 기존 분석 결과 삭제 (재분석 시 최신 결과만 유지)
         with get_db() as db:
             today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-            already_analyzed = set(
-                row[0] for row in db.query(Stock.ticker)
-                .join(AIRecommendation, AIRecommendation.stock_id == Stock.id)
-                .filter(AIRecommendation.recommendation_date >= today_start)
-                .all()
-            )
-            before_count = len(tickers)
-            tickers = [t for t in tickers if t not in already_analyzed]
-            if already_analyzed:
-                logger.info(f"[AI 분석] 오늘 이미 분석된 {before_count - len(tickers)}개 종목 제외 → {len(tickers)}개 분석 예정")
-
-        if not tickers:
-            logger.info("[AI 분석] 모든 종목이 오늘 이미 분석됨. 스킵합니다.")
-            return results
+            deleted = db.query(AIRecommendation).filter(
+                AIRecommendation.recommendation_date >= today_start
+            ).delete(synchronize_session=False)
+            if deleted:
+                logger.info(f"[AI 분석] 오늘 기존 분석 {deleted}건 삭제 → 전체 재분석 시작")
 
         import time
         import re as _re
